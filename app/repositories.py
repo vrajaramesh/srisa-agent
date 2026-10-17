@@ -20,6 +20,7 @@ from app.models import (
     Conversation,
     LlmTurn,
     Message,
+    OrderDraft,
 )
 from app.webhook_parser import IncomingMessage, StatusUpdate
 
@@ -75,6 +76,7 @@ async def insert_inbound_message(
             external_message_id=msg.id,
             type=msg.type,
             text=msg.text,
+            reply_id=msg.reply_id,
             raw=msg.raw or None,
             status=status,
         )
@@ -200,3 +202,20 @@ def add_outbound_message(
     )
     session.add(message)
     return message
+
+
+async def open_draft(session: AsyncSession, conversation_id: uuid.UUID) -> OrderDraft | None:
+    """The conversation's open order draft (at most one, enforced by a partial unique index)."""
+    stmt = select(OrderDraft).where(OrderDraft.conversation_id == conversation_id, OrderDraft.status == "open")
+    return (await session.execute(stmt)).scalar_one_or_none()
+
+
+async def last_outbound(session: AsyncSession, conversation_id: uuid.UUID) -> Message | None:
+    """Most recent message we sent in this conversation (used to recognise a 'yes' to the summary)."""
+    stmt = (
+        select(Message)
+        .where(Message.conversation_id == conversation_id, Message.direction == OUTBOUND)
+        .order_by(Message.created_at.desc(), Message.id.desc())
+        .limit(1)
+    )
+    return (await session.execute(stmt)).scalar_one_or_none()

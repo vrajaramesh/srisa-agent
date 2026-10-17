@@ -39,6 +39,7 @@ class IncomingMessage:
     text: str | None = None  # only for type == "text"
     profile_name: str | None = None  # from value.contacts[]
     phone_number_id: str | None = None  # which of our numbers received it
+    reply_id: str | None = None  # id of a tapped reply button / list row; its title is in text
     raw: dict[str, Any] = field(default_factory=dict, compare=False, repr=False)  # original JSON
 
 
@@ -88,6 +89,9 @@ def _parse_message(raw: dict[str, Any], names: dict[str, str], phone_number_id: 
         return None
     msg_type = raw.get("type", "unknown")
     text = (raw.get("text") or {}).get("body") if msg_type == "text" else None
+    reply_id, reply_title = _reply(raw, msg_type)
+    if reply_title is not None:
+        text = reply_title
     return IncomingMessage(
         id=msg_id,
         from_=sender,
@@ -96,8 +100,25 @@ def _parse_message(raw: dict[str, Any], names: dict[str, str], phone_number_id: 
         text=text,
         profile_name=names.get(sender),
         phone_number_id=phone_number_id,
+        reply_id=reply_id,
         raw=raw,
     )
+
+
+def _reply(raw: dict[str, Any], msg_type: str) -> tuple[str | None, str | None]:
+    """(id, title) of a tapped reply.
+
+    interactive.button_reply / interactive.list_reply = taps on our reply buttons / list rows;
+    legacy "button" = a quick-reply button on a template message (payload is its id).
+    """
+    if msg_type == "interactive":
+        interactive = raw.get("interactive") or {}
+        chosen = interactive.get("button_reply") or interactive.get("list_reply") or {}
+        return chosen.get("id"), chosen.get("title")
+    if msg_type == "button":
+        button = raw.get("button") or {}
+        return button.get("payload"), button.get("text")
+    return None, None
 
 
 def parse_webhook(payload: dict[str, Any]) -> ParsedWebhook:

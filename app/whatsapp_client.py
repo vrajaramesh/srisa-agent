@@ -110,6 +110,68 @@ async def send_image(to: str, url: str, caption: str | None = None) -> SendResul
     return await _post_messages(payload, action="send_image")
 
 
+# WhatsApp interactive message limits (Cloud API).
+MAX_BUTTONS, BUTTON_TITLE, BUTTON_ID = 3, 20, 256
+MAX_LIST_ROWS, ROW_TITLE, ROW_DESCRIPTION, ROW_ID, LIST_BUTTON, SECTION_TITLE = 10, 24, 72, 200, 20, 24
+INTERACTIVE_BODY = 1024
+
+
+def clip(text: str | None, limit: int) -> str:
+    """Trim to `limit` characters on a character boundary (Python str = code points, so emoji stay whole)."""
+    text = (text or "").strip()
+    return text if len(text) <= limit else text[: limit - 1].rstrip() + "…"
+
+
+def build_buttons(body: str, buttons: list[dict[str, str]]) -> dict[str, Any]:
+    """Interactive "button" payload part, limits enforced: <=3 buttons, title <=20, body <=1024."""
+    if len(buttons) > MAX_BUTTONS:
+        logger.warning("Too many reply buttons; extra dropped", extra={"fields": {"count": len(buttons)}})
+    return {
+        "type": "button",
+        "body": {"text": clip(body, INTERACTIVE_BODY)},
+        "action": {"buttons": [
+            {"type": "reply", "reply": {"id": b["id"][:BUTTON_ID], "title": clip(b["title"], BUTTON_TITLE)}}
+            for b in buttons[:MAX_BUTTONS]
+        ]},
+    }
+
+
+def build_list(body: str, button_text: str, sections: list[dict[str, Any]]) -> dict[str, Any]:
+    """Interactive "list" payload part: <=10 rows in total, row title <=24, description <=72, button <=20."""
+    out_sections, remaining = [], MAX_LIST_ROWS
+    for section in sections:
+        rows = []
+        for row in section.get("rows", [])[:remaining]:
+            item = {"id": row["id"][:ROW_ID], "title": clip(row["title"], ROW_TITLE)}
+            if row.get("description"):
+                item["description"] = clip(row["description"], ROW_DESCRIPTION)
+            rows.append(item)
+        remaining -= len(rows)
+        if rows:
+            out_sections.append({"title": clip(section.get("title") or "Options", SECTION_TITLE), "rows": rows})
+        if remaining <= 0:
+            break
+    return {
+        "type": "list",
+        "body": {"text": clip(body, INTERACTIVE_BODY)},
+        "action": {"button": clip(button_text, LIST_BUTTON), "sections": out_sections},
+    }
+
+
+async def send_buttons(to: str, body: str, buttons: list[dict[str, str]]) -> SendResult:
+    """Reply buttons (the customer's tap comes back as interactive.button_reply with our id)."""
+    payload = {"messaging_product": "whatsapp", "to": to, "type": "interactive",
+               "interactive": build_buttons(body, buttons)}
+    return await _post_messages(payload, action="send_buttons")
+
+
+async def send_list(to: str, body: str, button_text: str, sections: list[dict[str, Any]]) -> SendResult:
+    """List message (the chosen row comes back as interactive.list_reply with our id)."""
+    payload = {"messaging_product": "whatsapp", "to": to, "type": "interactive",
+               "interactive": build_list(body, button_text, sections)}
+    return await _post_messages(payload, action="send_list")
+
+
 async def mark_as_read(message_id: str) -> SendResult:
     """Mark an incoming message as read (customer sees blue ticks)."""
     payload = {"messaging_product": "whatsapp", "status": "read", "message_id": message_id}

@@ -31,7 +31,7 @@ def test_text_message_stored_and_answered(client: TestClient, graph_api: respx.R
     conv = run_sql(f"SELECT channel, external_user_id, customer_name, stage, needs_human FROM {TEST_SCHEMA}.conversations")
     assert conv == [
         {"channel": "whatsapp", "external_user_id": "919876543210", "customer_name": "Asha Rao",
-         "stage": "new", "needs_human": False}
+         "stage": "browsing", "needs_human": False}
     ]
     inbound, outbound = _messages()
     assert inbound["direction"] == "in" and inbound["status"] == "processed" and inbound["has_raw"]

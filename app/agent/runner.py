@@ -77,8 +77,7 @@ async def _call(client: Any, result: AgentResult, **kwargs: Any) -> Any:
 
 
 async def run_agent(conversation: Conversation, history: list[Message], ctx: tools.ToolContext,
-                    settings: AgentSettings, *, client: Any = None,
-                    has_saved_measurements: bool | None = None) -> AgentResult:
+                    settings: AgentSettings, *, client: Any = None) -> AgentResult:
     """Run Claude with our tools until it answers (or a limit/error is hit). Never raises."""
     started = time.monotonic()
     result = AgentResult(model=settings.llm_model)
@@ -90,8 +89,7 @@ async def run_agent(conversation: Conversation, history: list[Message], ctx: too
     request = {
         "model": settings.llm_model,
         "max_tokens": settings.llm_max_tokens,
-        "system": context.build_system(conversation, settings.brand_name, has_saved_measurements),
-        "tools": tools.tool_definitions(),
+        "system": context.build_system(conversation, settings.brand_name, await tools.progress(ctx)),
         "output_config": {"effort": settings.llm_effort},
         "betas": [FALLBACK_BETA],
         "fallbacks": "default",
@@ -101,7 +99,8 @@ async def run_agent(conversation: Conversation, history: list[Message], ctx: too
     raised_max_tokens = False
     try:
         while True:
-            response = await _call(client, result, messages=messages, **request)
+            # Tools follow the CURRENT stage (a tool like start_order can move it during this run).
+            response = await _call(client, result, messages=messages, tools=tools.tool_definitions(ctx.stage), **request)
             _add_usage(result, getattr(response, "usage", None))
             result.stop_reason = response.stop_reason
 

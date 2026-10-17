@@ -35,32 +35,46 @@ def static_system_prompt(brand_name: str) -> str:
     return _prompt_template(PROMPT_PATH.stat().st_mtime).replace("{BRAND_NAME}", brand_name)
 
 
-def facts_block(conversation: Conversation, has_saved_measurements: bool | None, now: datetime | None = None) -> str:
-    """Per-turn facts. Sent AFTER the cache breakpoint, so changing them never invalidates the cache."""
+def facts_block(conversation: Conversation, order: dict[str, Any] | None = None, now: datetime | None = None) -> str:
+    """Per-turn facts. Sent AFTER the cache breakpoint, so changing them never invalidates the cache.
+    `order` is tools.progress(): stage, filled draft fields, missing fields, summary awaiting confirmation."""
     today = (now or datetime.now(IST)).astimezone(IST)
-    measurements = {True: "yes", False: "no", None: "unknown (ordering is not enabled yet)"}[has_saved_measurements]
-    return "\n".join([
+    order = order or {}
+    lines = [
         "Conversation facts (from our system, not from the customer):",
         f"- Customer name (WhatsApp profile): {conversation.customer_name or 'unknown'}",
         f"- Design she is currently looking at: {conversation.current_product_code or 'none yet'}",
-        f"- Conversation stage: {conversation.stage or 'new'}",
-        f"- Saved measurements: {measurements}",
+        f"- Order stage: {order.get('stage') or conversation.stage or 'browsing'}",
+    ]
+    if order.get("draft"):
+        filled = ", ".join(f"{k}={v}" for k, v in order["draft"].items())
+        lines.append(f"- Order so far: {filled}")
+    if order.get("missing_fields"):
+        lines.append(f"- Still needed: {', '.join(order['missing_fields'])}")
+    if order.get("option_groups_to_choose"):
+        lines.append(f"- Option groups still to choose: {', '.join(order['option_groups_to_choose'])}")
+    lines.append("- Order summary awaiting her confirmation: "
+                 + ("yes - wait for her to tap Confirm or Change" if order.get("summary_awaiting_confirmation") else "no"))
+    lines += [
         f"- Today: {today:%A, %d %B %Y} (Asia/Kolkata)",
         "- She messaged within the last 24 hours, so every reply is normal free-form WhatsApp text.",
-    ])
+    ]
+    return "\n".join(lines)
 
 
-def build_system(conversation: Conversation, brand_name: str, has_saved_measurements: bool | None = None,
+def build_system(conversation: Conversation, brand_name: str, order: dict[str, Any] | None = None,
                  now: datetime | None = None) -> list[dict[str, Any]]:
     """Two system blocks. The breakpoint on the first caches tools + static prompt (tools render before system)."""
     return [
         {"type": "text", "text": static_system_prompt(brand_name), "cache_control": {"type": "ephemeral"}},
-        {"type": "text", "text": facts_block(conversation, has_saved_measurements, now)},
+        {"type": "text", "text": facts_block(conversation, order, now)},
     ]
 
 
 def message_text(message: Message) -> str:
     """How one stored message reads to the model."""
+    if message.direction == INBOUND and message.type in ("interactive", "button") and message.text:
+        return f"[tapped: {message.text}]"
     if message.text:
         return message.text
     if message.direction != INBOUND:

@@ -11,6 +11,7 @@ import respx
 from httpx import Response
 
 from app.agent import context, resolution, tools
+from app.agent.local import MemoryStore, RecordingMessenger
 from app.agent.formatting import format_rupees, split_message
 from app.agent.runner import run_agent
 from app.config import get_settings
@@ -29,8 +30,9 @@ DESIGN = {
 
 
 def conversation(**kw: Any) -> Conversation:
+    kw.setdefault("stage", "browsing")
     return Conversation(id=uuid.uuid4(), channel="whatsapp", external_user_id="919876543210",
-                        customer_name="Asha", stage="new", needs_human=False, **kw)
+                        customer_name="Asha", needs_human=False, **kw)
 
 
 def inbound(text: str | None, type_: str = "text", raw: dict | None = None) -> Message:
@@ -52,19 +54,8 @@ async def mybill(router: respx.MockRouter):
         yield MybillClient("https://mybill.test", static_token_provider(None), http)
 
 
-class Photos:
-    """Records images 'sent' by send_design_photos."""
-
-    def __init__(self) -> None:
-        self.sent: list[tuple[str, str, str | None]] = []
-
-    async def __call__(self, to: str, url: str, caption: str | None) -> str | None:
-        self.sent.append((to, url, caption))
-        return f"wamid.img{len(self.sent)}"
-
-
 def ctx(conv: Conversation, mybill: MybillClient | None) -> tools.ToolContext:
-    return tools.ToolContext(conversation=conv, mybill=mybill, send_image=Photos())
+    return tools.ToolContext(conversation=conv, mybill=mybill, messenger=RecordingMessenger(), store=MemoryStore())
 
 
 # ── Loop ─────────────────────────────────────────────────────────────────────
@@ -87,7 +78,7 @@ async def test_tool_loop_runs_tool_then_answers(fake_llm, mybill) -> None:
     assert tool_result["tool_use_id"] == "toolu_get_design" and "is_error" not in tool_result
     payload = json.loads(tool_result["content"])
     assert payload["base_price"] == 1899.0 and payload["image_count"] == 4
-    assert payload["option_groups"][0]["options"][0] == {"name": "Full sleeve", "price_delta": 150.0}
+    assert payload["option_groups"][0]["options"][0] == {"option_id": 4, "name": "Full sleeve", "price_delta": 150.0}
 
 
 async def test_request_shape_caches_static_prompt_and_tools(fake_llm, mybill) -> None:
@@ -105,7 +96,7 @@ async def test_request_shape_caches_static_prompt_and_tools(fake_llm, mybill) ->
     assert "cache_control" not in facts and "KUR-101" in facts["text"] and "Asia/Kolkata" in facts["text"]
     # Cached prefix (tools + static prompt) must be byte-identical across turns.
     assert first["tools"] == second["tools"] and first["system"][0] == second["system"][0]
-    assert [t["name"] for t in first["tools"]] == [t.name for t in tools.TOOLS]
+    assert [t["name"] for t in first["tools"]] == [t.name for t in tools.tools_for_stage("browsing")]
 
 
 async def test_stops_at_tool_iteration_limit(fake_llm, mybill) -> None:
@@ -164,11 +155,12 @@ async def test_model_cannot_override_customer_identity(mybill) -> None:
         c, "send_design_photos",
         {"code": "KUR-101", "to": "+911111111111", "phone": "911111111111", "customer_id": 99, "max_photos": 9})
     assert not is_error and result["sent"] == 3
-    assert {to for to, _, _ in c.send_image.sent} == {"919876543210"}
-    assert c.send_image.sent[0][2] == "Anarkali Kurta – ₹1,899" and c.send_image.sent[1][2] is None
+    images = c.messenger.of_kind("image")   # the Messenger only ever sends to the conversation's customer
+    assert len(images) == 3 and images[0]["caption"] == "Anarkali Kurta – ₹1,899" and images[1]["caption"] is None
     # No tool schema even offers identity or price fields.
     for tool in tools.TOOLS:
-        assert not {"to", "phone", "customer_id", "price", "wa_id"} & set(tool.input_schema.get("properties", {}))
+        assert not {"to", "customer_id", "price", "total", "wa_id", "idempotency_key"} & \
+            set(tool.input_schema.get("properties", {}))
 
 
 async def test_tool_errors_are_returned_not_raised(mybill) -> None:
@@ -221,15 +213,18 @@ def test_history_merges_roles_and_starts_with_customer() -> None:
 
 
 def test_buttons_and_captions_reach_the_model() -> None:
-    assert context.message_text(inbound(None, "button", {"button": {"text": "Show designs"}})) == "Show designs"
-    assert context.message_text(inbound(None, "interactive", {"interactive": {"button_reply": {"title": "Yes"}}})) == "Yes"
+    assert context.message_text(inbound("Show designs", "button")) == "[tapped: Show designs]"
+    assert context.message_text(inbound("✅ Confirm", "interactive")) == "[tapped: ✅ Confirm]"
     assert context.message_text(inbound(None, "image", {"image": {"caption": "like this"}})) == \
         "[customer sent an image with the caption: like this]"
 
 
 def test_facts_block() -> None:
-    facts = context.facts_block(conversation(current_product_code="LEH-1"), None, now=datetime(2026, 10, 17, 20, 0))
-    assert "Asha" in facts and "LEH-1" in facts and "unknown" in facts and "free-form" in facts
+    order = {"stage": "sizing", "draft": {"design_code": "LEH-1", "size_code": "M"},
+             "missing_fields": ["height_cm", "fit_preference"], "summary_awaiting_confirmation": False}
+    facts = context.facts_block(conversation(current_product_code="LEH-1"), order, now=datetime(2026, 10, 17, 20, 0))
+    assert "Asha" in facts and "LEH-1" in facts and "Order stage: sizing" in facts
+    assert "height_cm, fit_preference" in facts and "awaiting her confirmation: no" in facts and "free-form" in facts
 
 
 # ── Formatting ───────────────────────────────────────────────────────────────

@@ -14,12 +14,13 @@ from sqlalchemy import (
     Index,
     Integer,
     MetaData,
+    Numeric,
     Text,
     UniqueConstraint,
     func,
     text as sql_text,
 )
-from sqlalchemy.dialects.postgresql import JSONB, UUID
+from sqlalchemy.dialects.postgresql import ARRAY, JSONB, UUID
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 SCHEMA = "agent"
@@ -49,9 +50,12 @@ class Conversation(Base):
     channel: Mapped[str] = mapped_column(Text)
     external_user_id: Mapped[str] = mapped_column(Text)  # wa_id or IG user id
     customer_name: Mapped[str | None] = mapped_column(Text)
-    stage: Mapped[str] = mapped_column(Text, server_default=sql_text("'new'"))
+    # browsing | sizing | customise | address | confirm | order_created - changed ONLY by code (agent/flow.py)
+    stage: Mapped[str] = mapped_column(Text, server_default=sql_text("'browsing'"))
     current_product_code: Mapped[str | None] = mapped_column(Text)
     needs_human: Mapped[bool] = mapped_column(Boolean, server_default=sql_text("false"))
+    # mybill-service customers.customer_id (set by start_order). Never shown to the model.
+    mybill_customer_id: Mapped[int | None] = mapped_column(Integer)
     # Why the bot handed over (e.g. "ready_to_order", "llm_failure: timeout"). Cleared on resume.
     needs_human_reason: Mapped[str | None] = mapped_column(Text)
     last_customer_message_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
@@ -81,6 +85,8 @@ class Message(Base):
     direction: Mapped[str] = mapped_column(Text)
     # Meta's "wamid...". Unique => duplicate webhook deliveries are stored once.
     external_message_id: Mapped[str | None] = mapped_column(Text, unique=True)
+    # id of a tapped reply button / list row (e.g. "size:M", "confirm:<draft>:<version>"); its title is in text
+    reply_id: Mapped[str | None] = mapped_column(Text)
     type: Mapped[str] = mapped_column(Text)
     text: Mapped[str | None] = mapped_column(Text)
     raw: Mapped[dict[str, Any] | None] = mapped_column(JSONB)
@@ -137,3 +143,49 @@ class LlmTurn(Base):
     stop_reason: Mapped[str | None] = mapped_column(Text)
     error: Mapped[str | None] = mapped_column(Text)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+DRAFT_OPEN, DRAFT_SUBMITTED, DRAFT_CANCELLED = "open", "submitted", "cancelled"
+
+
+class OrderDraft(Base):
+    """The order being assembled in a conversation. Code owns it; the model only fills it via tools."""
+
+    __tablename__ = "order_drafts"
+    __table_args__ = (
+        CheckConstraint("status IN ('open', 'submitted', 'cancelled')", name="ck_order_drafts_status"),
+        CheckConstraint("qty BETWEEN 1 AND 5", name="ck_order_drafts_qty"),
+        Index("uq_order_drafts_open_per_conversation", "conversation_id", unique=True,
+              postgresql_where=sql_text("status = 'open'")),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    conversation_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("conversations.id", ondelete="CASCADE")
+    )
+    status: Mapped[str] = mapped_column(Text, default=DRAFT_OPEN, server_default=sql_text("'open'"))
+    # +1 on every change; the confirmation must match the version the summary was sent for.
+    version: Mapped[int] = mapped_column(Integer, default=1, server_default=sql_text("1"))
+    design_code: Mapped[str | None] = mapped_column(Text)
+    size_code: Mapped[str | None] = mapped_column(Text)
+    height_cm: Mapped[float | None] = mapped_column(Numeric(5, 1))
+    fit_preference: Mapped[str | None] = mapped_column(Text)
+    bust_in: Mapped[float | None] = mapped_column(Numeric(5, 1))
+    waist_in: Mapped[float | None] = mapped_column(Numeric(5, 1))
+    hip_in: Mapped[float | None] = mapped_column(Numeric(5, 1))
+    measurement_notes: Mapped[str | None] = mapped_column(Text)
+    option_ids: Mapped[list[int]] = mapped_column(ARRAY(Integer), default=list, server_default=sql_text("'{}'"))
+    qty: Mapped[int] = mapped_column(Integer, default=1, server_default=sql_text("1"))
+    delivery_name: Mapped[str | None] = mapped_column(Text)
+    delivery_phone: Mapped[str | None] = mapped_column(Text)
+    address_line1: Mapped[str | None] = mapped_column(Text)
+    address_line2: Mapped[str | None] = mapped_column(Text)
+    city: Mapped[str | None] = mapped_column(Text)
+    state: Mapped[str | None] = mapped_column(Text)
+    pincode: Mapped[str | None] = mapped_column(Text)
+    last_quote: Mapped[dict[str, Any] | None] = mapped_column(JSONB)
+    summary_sent_version: Mapped[int | None] = mapped_column(Integer)
+    mybill_order_no: Mapped[str | None] = mapped_column(Text)
+    mybill_customer_id: Mapped[int | None] = mapped_column(Integer)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())

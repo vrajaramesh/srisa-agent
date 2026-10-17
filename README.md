@@ -73,6 +73,21 @@ Notes:
   - If mybill is down, tools return `temporarily_unavailable` and the prompt tells Claude to hand over.
 - **Cost and debugging:** `agent.llm_turns` has one row per run (tokens, cache, tool calls with their duration, latency, errors).
 
+### Order flow (code controls the order)
+
+```
+browsing ─start_order─▶ sizing ─(size+height+fit)─▶ customise ─finish_customisation─▶ address ─(details+quote)─▶ confirm ─(Confirm tap / "yes")─▶ order_created
+```
+
+- **`agent/flow.py`** is the state machine. Only code changes `conversations.stage`. Every change to a draft increases `order_drafts.version` and makes any summary sent earlier non-confirmable.
+- **Tools are limited by stage.** The runner offers only the current stage's tools (`tools.tools_for_stage`), and each handler checks the stage again.
+- **Buttons and lists:** sizes, fit and options are sent as WhatsApp buttons or lists. Taps on `size:` / `fit:` / `opt:` ids are applied by code before Claude runs.
+- **Confirmation is code, not a tool** (`agent/orders.py`, called by the worker before the model).
+  - The order is created only by a tap on `confirm:<draft>:<version>`, or a short "yes" right after the summary for that same version.
+  - mybill `create_order` is called with `idempotency_key = "<draft_id>:<version>"`, so a double tap or a retry never creates a second order or a second confirmation message.
+  - If she confirms an older version, the current summary is re-sent instead.
+- **The model never sees** customer ids, idempotency keys or totals it didn't receive from a tool result.
+
 ### Tuning the prompt in your terminal
 
 ```bash
@@ -80,7 +95,7 @@ python scripts/chat_cli.py --mock          # sample catalog, only needs ANTHROPI
 python scripts/chat_cli.py                 # real mybill: MYBILL_BASE_URL + gcloud impersonation of srisa-agent-sa
 ```
 
-The CLI prints every tool call with its result, plus tokens and latency. `system.md` is re-read on every turn, so edit it while you chat. Commands: `/image [caption]`, `/voice`, `/facts`, `/reset`, `/quit`.
+The CLI prints every tool call with its result, the stage after each turn, plus tokens and latency. Buttons and lists are shown with their ids; tap them with `/tap <id>`, e.g. `/tap size:M` or `/tap confirm:<draft>:<version>`. With `--mock`, orders are fake. Without it, the CLI creates **real** customers and orders in mybill. `system.md` is re-read on every turn, so edit it while you chat. Commands: `/tap <id>`, `/image [caption]`, `/voice`, `/progress`, `/facts`, `/reset`, `/quit`.
 
 ## 1. Local setup
 
@@ -236,7 +251,7 @@ gcloud run deploy srisa-agent --image=$IMAGE --region=$REGION \
 Then set the Meta **Callback URL** to `https://srisa-agent-276371417285.asia-south1.run.app/webhook/whatsapp`, using the same verify token.
 
 **Order for the first rollout:**
-1. `alembic upgrade head` (now applies `0002`: `llm_turns` and `conversations.needs_human_reason`)
+1. `alembic upgrade head` (applies up to `0003`: `order_drafts`, stage values, `messages.reply_id`, `conversations.mybill_customer_id`)
 2. GCP setup (section 5)
 3. Push to `main`
 4. Grant `run.invoker`

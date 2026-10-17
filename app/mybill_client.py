@@ -33,6 +33,14 @@ class MybillUnavailable(MybillError):
     """mybill could not be reached, timed out, rejected our credentials or answered 5xx."""
 
 
+class MybillRejected(MybillError):
+    """mybill refused the request on business grounds (400/409/422) - retrying won't help."""
+
+    def __init__(self, status: int, code: str | None, message: str | None, details: dict | None = None) -> None:
+        super().__init__(f"{status} {code}: {message}")
+        self.status, self.code, self.message, self.details = status, code, message, details or {}
+
+
 TokenProvider = Callable[[], Awaitable[str | None]]
 
 
@@ -91,7 +99,36 @@ class MybillClient:
         """[{size_code, bust_in, waist_in, hip_in, shoulder_in, length_in}]."""
         return await self._get("/api/agent/size-chart")
 
+    async def upsert_customer(self, phone_e164: str, name: str | None) -> dict[str, Any]:
+        """Find-or-create the mybill customer for this WhatsApp number -> {customer_id, ...}."""
+        body: dict[str, Any] = {"phone_e164": phone_e164}
+        if name:
+            body["name"] = name[:100]
+        return await self._request("POST", "/api/agent/customers/upsert", json=body)
+
+    async def get_latest_measurements(self, customer_id: int) -> dict[str, Any] | None:
+        """Customer's latest saved size profile, or None if none recorded."""
+        try:
+            return await self._get(f"/api/agent/customers/{customer_id}/measurements")
+        except MybillNotFound:
+            return None
+
+    async def save_measurements(self, customer_id: int, measurements: dict[str, Any]) -> dict[str, Any]:
+        return await self._request("POST", f"/api/agent/customers/{customer_id}/measurements", json=measurements)
+
+    async def quote(self, request: dict[str, Any]) -> dict[str, Any]:
+        """Server-side price + delivery estimate (nothing saved)."""
+        return await self._request("POST", "/api/agent/orders/quote", json=request)
+
+    async def create_order(self, request: dict[str, Any]) -> dict[str, Any]:
+        """DRAFT order in mybill. Same idempotency_key -> same order (safe to retry)."""
+        return await self._request("POST", "/api/agent/orders", json=request)
+
     async def _get(self, path: str, params: dict[str, Any] | None = None) -> Any:
+        return await self._request("GET", path, params=params)
+
+    async def _request(self, method: str, path: str, params: dict[str, Any] | None = None,
+                       json: dict[str, Any] | None = None) -> Any:
         try:
             token = await self._token_provider()
         except Exception as exc:  # metadata server / gcloud problems
@@ -99,12 +136,20 @@ class MybillClient:
             raise MybillUnavailable("token unavailable") from exc
         headers = {"Authorization": f"Bearer {token}"} if token else {}
         try:
-            resp = await self._http.get(f"{self._base}{path}", params=params, headers=headers)
+            resp = await self._http.request(method, f"{self._base}{path}", params=params, json=json, headers=headers)
         except httpx.HTTPError as exc:
             logger.error("mybill request failed", extra={"fields": {"path": path, "error": repr(exc)}})
             raise MybillUnavailable(repr(exc)) from exc
         if resp.status_code == 404:
             raise MybillNotFound(path)
+        if resp.status_code in (400, 409, 422):
+            try:
+                err = resp.json()
+            except ValueError:
+                err = {}
+            logger.warning("mybill rejected request", extra={"fields": {
+                "path": path, "status_code": resp.status_code, "code": err.get("code"), "message": err.get("message")}})
+            raise MybillRejected(resp.status_code, err.get("code"), err.get("message"), err.get("details"))
         if not resp.is_success:
             # 401/403 = our token was rejected; 5xx = mybill trouble. Either way: unavailable to the agent.
             logger.error("mybill error", extra={"fields": {"path": path, "status_code": resp.status_code,
