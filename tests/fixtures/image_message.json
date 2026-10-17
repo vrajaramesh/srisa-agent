@@ -1,0 +1,40 @@
+{
+  "object": "whatsapp_business_account",
+  "entry": [
+    {
+      "id": "102290129340398",
+      "changes": [
+        {
+          "field": "messages",
+          "value": {
+            "messaging_product": "whatsapp",
+            "metadata": {
+              "display_phone_number": "15550783881",
+              "phone_number_id": "106540352242922"
+            },
+            "contacts": [
+              {
+                "profile": { "name": "Asha Rao" },
+                "wa_id": "919876543210"
+              }
+            ],
+            "messages": [
+              {
+                "from": "919876543210",
+                "id": "wamid.HBgMOTE5ODc2NTQzMjEwFQIAEhggSU1BR0UxMjM0NTY3ODkwQUJDREVGMDEyMzQ1Njc4OQA=",
+                "timestamp": "1760700060",
+                "type": "image",
+                "image": {
+                  "caption": "Something like this?",
+                  "mime_type": "image/jpeg",
+                  "sha256": "Qm9ndXNTaGEyNTZGb3JUZXN0cw==",
+                  "id": "1003383421387256"
+                }
+              }
+            ]
+          }
+        }
+      ]
+    }
+  ]
+}

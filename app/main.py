@@ -1,0 +1,208 @@
+"""FastAPI app: health check, WhatsApp webhook and the Cloud Tasks worker endpoint."""
+
+import json
+import logging
+import uuid
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
+
+from fastapi import BackgroundTasks, FastAPI, Query, Request, Response
+from fastapi.concurrency import run_in_threadpool
+from fastapi.responses import JSONResponse, PlainTextResponse
+from pydantic import BaseModel
+from sqlalchemy.exc import SQLAlchemyError
+
+from app import mybill_client, queue, worker, whatsapp_client
+from app import repositories as repo
+from app.config import get_settings
+from app.db import dispose_db, get_sessionmaker, init_db
+from app.logging_setup import setup_logging
+from app.models import RECEIVED, SKIPPED, Conversation
+from app.security import tokens_match, verify_admin, verify_signature, verify_tasks_token
+from app.webhook_parser import IncomingMessage, ParsedWebhook, parse_webhook
+
+logger = logging.getLogger("srisa_agent")
+
+CHANNEL = "whatsapp"
+
+# At import time, so uvicorn's own startup lines are already JSON.
+setup_logging(get_settings().log_level)
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI) -> AsyncIterator[None]:
+    """Own the DB pool and the shared HTTP client for the app's lifetime."""
+    settings = get_settings()
+    init_db(settings.database_url.get_secret_value(), settings.db_schema)
+    await whatsapp_client.start_client()
+    await mybill_client.start_client(settings)
+    logger.info("srisa-agent started", extra={"fields": {
+        "use_cloud_tasks": settings.use_cloud_tasks, "llm_model": settings.llm_model,
+        "mybill_configured": bool(settings.mybill_base_url)}})
+    try:
+        yield
+    finally:
+        await mybill_client.close_client()
+        await whatsapp_client.close_client()
+        await dispose_db()
+
+
+app = FastAPI(title="srisa-agent", lifespan=lifespan)
+
+
+@app.get("/health")
+async def health() -> dict[str, str]:
+    """Liveness probe."""
+    return {"status": "ok"}
+
+
+@app.get("/webhook/whatsapp")
+async def verify_webhook(
+    mode: str | None = Query(None, alias="hub.mode"),
+    token: str | None = Query(None, alias="hub.verify_token"),
+    challenge: str | None = Query(None, alias="hub.challenge"),
+) -> Response:
+    """Meta's one-time subscription handshake.
+
+    When you save the webhook URL in the Meta dashboard, Meta calls this with
+    hub.mode=subscribe, your verify token and a random challenge. Echoing the challenge
+    back (as plain text, not JSON) proves we own the endpoint.
+    """
+    if mode == "subscribe" and tokens_match(token, get_settings().wa_verify_token.get_secret_value()):
+        logger.info("Webhook verified")
+        return PlainTextResponse(challenge or "", status_code=200)
+    logger.warning("Webhook verification failed", extra={"fields": {"mode": mode}})
+    return Response(status_code=403)
+
+
+@app.post("/webhook/whatsapp")
+async def receive_webhook(request: Request, background: BackgroundTasks) -> Response:
+    """Receive WhatsApp events: verify -> save -> enqueue -> 200. No replying here."""
+    raw_body = await request.body()  # raw bytes - the signature is over these exact bytes
+    signature = request.headers.get("X-Hub-Signature-256")
+    if not verify_signature(raw_body, signature, get_settings().wa_app_secret.get_secret_value()):
+        logger.warning(
+            "Rejected webhook: missing or invalid signature",
+            extra={"fields": {"has_signature": signature is not None}},
+        )
+        return Response(status_code=401)
+
+    try:
+        payload = json.loads(raw_body)
+    except ValueError:
+        logger.warning("Rejected webhook: body is not valid JSON")
+        return Response(status_code=400)
+
+    try:
+        conversation_ids = await store_webhook(parse_webhook(payload))
+    except (SQLAlchemyError, OSError):
+        # Not saved, so ask Meta to redeliver later instead of losing the message.
+        logger.exception("Failed to store webhook")
+        return Response(status_code=500)
+
+    await queue.enqueue(conversation_ids, background)  # never raises
+    return Response(status_code=200)
+
+
+async def store_webhook(parsed: ParsedWebhook) -> list[uuid.UUID]:
+    """Save messages and receipts in one transaction. Returns conversations needing work."""
+    allowed = get_settings().allowed_sender_set
+    to_process: list[uuid.UUID] = []
+    async with get_sessionmaker()() as session, session.begin():
+        for msg in parsed.messages:
+            conversation_id = await repo.upsert_conversation(session, CHANNEL, msg)
+            # Stored as "skipped" (never answered) so clearing ALLOWED_SENDERS later
+            # doesn't make the bot reply to old messages.
+            is_allowed = not allowed or msg.from_ in allowed
+            stored = await repo.insert_inbound_message(
+                session, conversation_id, msg, RECEIVED if is_allowed else SKIPPED
+            )
+            if stored is None:
+                logger.info("Duplicate message ignored", extra={"fields": {"message_id": msg.id}})
+                continue
+            log_incoming(msg)
+            if not is_allowed:
+                logger.info("Sender not in ALLOWED_SENDERS; not replying", extra={"fields": {"message_id": msg.id}})
+            elif conversation_id not in to_process:
+                to_process.append(conversation_id)
+
+        for status in parsed.statuses:
+            updated = await repo.apply_status(session, status)
+            logger.debug(
+                "Status update",
+                extra={"fields": {"message_id": status.id, "status": status.status, "matched": updated}},
+            )
+    return to_process
+
+
+def log_incoming(msg: IncomingMessage) -> None:
+    """Log the key facts about an incoming customer message."""
+    logger.info(
+        "Incoming message",
+        extra={
+            "fields": {
+                "message_id": msg.id,
+                "from": msg.from_,
+                "profile_name": msg.profile_name,
+                "type": msg.type,
+                "text": msg.text,
+            }
+        },
+    )
+
+
+class ProcessMessageTask(BaseModel):
+    """Body Cloud Tasks POSTs to the worker."""
+
+    conversation_id: uuid.UUID
+
+
+@app.post(queue.TASK_PATH)
+async def process_message_task(request: Request, task: ProcessMessageTask) -> Response:
+    """Cloud Tasks worker: answer one conversation's pending messages.
+
+    500 on a failed send makes Cloud Tasks retry (per the queue's retry config).
+    """
+    settings = get_settings()
+    if settings.use_cloud_tasks:
+        authorized = await run_in_threadpool(
+            verify_tasks_token,
+            request.headers.get("Authorization"),
+            settings.tasks_target_url.rstrip("/"),
+            settings.tasks_service_account,
+        )
+        if not authorized:
+            logger.warning("Rejected task: missing or invalid OIDC token")
+            return Response(status_code=403)
+
+    result = await worker.process_conversation(task.conversation_id)
+    return JSONResponse(
+        {"processed": result.processed, "failed": result.failed},
+        status_code=500 if result.failed else 200,
+    )
+
+
+@app.post("/admin/conversations/{conversation_id}/resume")
+async def resume_conversation(conversation_id: uuid.UUID, request: Request) -> Response:
+    """Hand a conversation back to the bot after the team has dealt with it (needs_human -> false)."""
+    settings = get_settings()
+    authorized = await run_in_threadpool(
+        verify_admin,
+        request.headers.get("Authorization"),
+        settings.admin_api_key.get_secret_value() if settings.admin_api_key else None,
+        settings.tasks_target_url.rstrip("/"),
+        settings.admin_email_set,
+    )
+    if not authorized:
+        logger.warning("Rejected admin request", extra={"fields": {"path": request.url.path}})
+        return Response(status_code=403)
+
+    async with get_sessionmaker()() as session, session.begin():
+        conversation = await session.get(Conversation, conversation_id)
+        if conversation is None:
+            return JSONResponse({"detail": "conversation not found"}, status_code=404)
+        previous = conversation.needs_human_reason
+        conversation.needs_human, conversation.needs_human_reason = False, None
+    logger.info("Conversation resumed by admin",
+                extra={"fields": {"conversation_id": str(conversation_id), "previous_reason": previous}})
+    return JSONResponse({"conversation_id": str(conversation_id), "needs_human": False})

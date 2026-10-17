@@ -1,0 +1,89 @@
+name: Deploy srisa-agent to Cloud Run
+
+on:
+  push:
+    branches:
+      - main
+
+env:
+  PROJECT_ID: project-0708fb26-e204-4400-ae9
+  REGION: asia-south1
+  SERVICE: srisa-agent
+  IMAGE: us-central1-docker.pkg.dev/project-0708fb26-e204-4400-ae9/mybill/srisa-agent
+  RUNTIME_SA: srisa-agent-sa@project-0708fb26-e204-4400-ae9.iam.gserviceaccount.com
+  TASKS_SA: srisa-agent-tasks@project-0708fb26-e204-4400-ae9.iam.gserviceaccount.com
+  SERVICE_URL: https://srisa-agent-276371417285.asia-south1.run.app
+
+jobs:
+  deploy:
+    name: Build and Deploy
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Authenticate to Google Cloud
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ secrets.WIF_PROVIDER }}
+          service_account: ${{ secrets.WIF_SERVICE_ACCOUNT }}
+
+      - name: Set up Cloud SDK
+        uses: google-github-actions/setup-gcloud@v2
+
+      - name: Configure Docker for Artifact Registry
+        run: gcloud auth configure-docker us-central1-docker.pkg.dev --quiet
+
+      # Runners are linux/amd64, which is what Cloud Run needs.
+      - name: Build and push image
+        run: |
+          docker build -t ${{ env.IMAGE }}:${{ github.sha }} .
+          docker push ${{ env.IMAGE }}:${{ github.sha }}
+
+      - name: Deploy
+        uses: google-github-actions/deploy-cloudrun@v2
+        with:
+          service: ${{ env.SERVICE }}
+          region: ${{ env.REGION }}
+          image: ${{ env.IMAGE }}:${{ github.sha }}
+          env_vars: |
+            GRAPH_API_VERSION=v25.0
+            LOG_LEVEL=INFO
+            WA_PHONE_NUMBER_ID=1369784996225320
+            DB_SCHEMA=agent
+            USE_CLOUD_TASKS=true
+            GCP_PROJECT=${{ env.PROJECT_ID }}
+            TASKS_QUEUE=srisa-agent-messages
+            TASKS_LOCATION=${{ env.REGION }}
+            TASKS_TARGET_URL=${{ env.SERVICE_URL }}
+            TASKS_SERVICE_ACCOUNT=${{ env.TASKS_SA }}
+            LLM_MODEL=claude-sonnet-5-5
+            LLM_MAX_TOKENS=600
+            LLM_MAX_TOOL_ITERATIONS=5
+            LLM_TIMEOUT_SECONDS=30
+            LLM_EFFORT=low
+            HISTORY_MESSAGES=20
+            MYBILL_BASE_URL=https://mybill-service-276371417285.us-central1.run.app
+            MYBILL_AUDIENCE=https://mybill-service-276371417285.us-central1.run.app
+            MYBILL_AUTH=google
+            ADMIN_ALLOWED_EMAILS=srisafabricshyd@gmail.com
+          secrets: |
+            WA_ACCESS_TOKEN=WA_ACCESS_TOKEN:latest
+            WA_APP_SECRET=WA_APP_SECRET:latest
+            WA_VERIFY_TOKEN=WA_VERIFY_TOKEN:latest
+            DATABASE_URL=DATABASE_URL:latest
+            ALLOWED_SENDERS=ALLOWED_SENDERS:latest
+            ANTHROPIC_API_KEY=ANTHROPIC_API_KEY:latest
+            ADMIN_API_KEY=ADMIN_API_KEY:latest
+          flags: >
+            --service-account=${{ env.RUNTIME_SA }}
+            --memory=512Mi
+            --cpu=1
+            --min-instances=0
+            --max-instances=3
+            --timeout=60
+            --allow-unauthenticated

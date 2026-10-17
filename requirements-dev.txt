@@ -1,0 +1,6 @@
+alembic==1.20.0
+pytest==9.1.1
+pytest-asyncio==1.4.0
+pytest-timeout==2.4.0
+respx==0.23.1
+python-dotenv==1.2.4
