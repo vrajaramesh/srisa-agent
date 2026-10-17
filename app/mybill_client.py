@@ -135,11 +135,21 @@ class MybillClient:
             logger.error("mybill token unavailable", extra={"fields": {"error": repr(exc)}})
             raise MybillUnavailable("token unavailable") from exc
         headers = {"Authorization": f"Bearer {token}"} if token else {}
-        try:
-            resp = await self._http.request(method, f"{self._base}{path}", params=params, json=json, headers=headers)
-        except httpx.HTTPError as exc:
-            logger.error("mybill request failed", extra={"fields": {"path": path, "error": repr(exc)}})
-            raise MybillUnavailable(repr(exc)) from exc
+        # GETs are retried once on timeout/connection errors (e.g. mybill cold start); writes are not.
+        attempts = 2 if method == "GET" else 1
+        for attempt in range(1, attempts + 1):
+            try:
+                resp = await self._http.request(method, f"{self._base}{path}", params=params, json=json, headers=headers)
+                break
+            except (httpx.TimeoutException, httpx.ConnectError) as exc:
+                if attempt < attempts:
+                    logger.warning("mybill request timed out, retrying once", extra={"fields": {"path": path}})
+                    continue
+                logger.error("mybill request failed", extra={"fields": {"path": path, "error": repr(exc)}})
+                raise MybillUnavailable(repr(exc)) from exc
+            except httpx.HTTPError as exc:
+                logger.error("mybill request failed", extra={"fields": {"path": path, "error": repr(exc)}})
+                raise MybillUnavailable(repr(exc)) from exc
         if resp.status_code == 404:
             raise MybillNotFound(path)
         if resp.status_code in (400, 409, 422):

@@ -41,7 +41,8 @@ class AgentSettings(BaseSettings):
     # google = Google ID token (metadata server on Cloud Run, or MYBILL_ID_TOKEN); none = local mybill (local profile)
     mybill_auth: str = "google"
     mybill_id_token: SecretStr | None = None  # static token for local runs (gcloud auth print-identity-token ...)
-    mybill_timeout_seconds: float = 8.0
+    # mybill-service runs with min-instances=0: a cold start takes ~20-25 s, so allow for it.
+    mybill_timeout_seconds: float = 30.0
 
 
 @lru_cache

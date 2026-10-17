@@ -249,3 +249,10 @@ def test_huge_paragraph_splits_at_sentences_then_hard_cut() -> None:
 
 def test_format_rupees() -> None:
     assert format_rupees(1899.0) == "₹1,899" and format_rupees("1299.50") == "₹1,299.50"
+
+
+async def test_mybill_get_retries_once_on_timeout(router: respx.MockRouter) -> None:
+    route = router.get(f"{MYBILL}/size-chart").mock(side_effect=[httpx.ReadTimeout("cold start"), Response(200, json=[])])
+    async with httpx.AsyncClient() as http:
+        client = MybillClient("https://mybill.test", static_token_provider(None), http)
+        assert await client.get_size_chart() == [] and route.call_count == 2
