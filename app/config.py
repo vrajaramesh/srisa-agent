@@ -76,6 +76,10 @@ class Settings(DatabaseSettings, AgentSettings):
 
     # POST /admin/** auth: Bearer ADMIN_API_KEY, or a Google ID token (audience = TASKS_TARGET_URL)
     # whose email is in ADMIN_ALLOWED_EMAILS (comma-separated).
+    # POST /internal/events (payment notifications from mybill-service): Google ID token whose email is this
+    # (mybill-service's runtime service account) and audience TASKS_TARGET_URL (this service's URL).
+    mybill_events_sa_email: str = "276371417285-compute@developer.gserviceaccount.com"
+
     admin_api_key: SecretStr | None = None
     admin_allowed_emails: str = ""
 

@@ -12,7 +12,7 @@ from fastapi.responses import JSONResponse, PlainTextResponse
 from pydantic import BaseModel
 from sqlalchemy.exc import SQLAlchemyError
 
-from app import mybill_client, queue, worker, whatsapp_client
+from app import events, mybill_client, queue, worker, whatsapp_client
 from app import repositories as repo
 from app.config import get_settings
 from app.db import dispose_db, get_sessionmaker, init_db
@@ -206,3 +206,24 @@ async def resume_conversation(conversation_id: uuid.UUID, request: Request) -> R
     logger.info("Conversation resumed by admin",
                 extra={"fields": {"conversation_id": str(conversation_id), "previous_reason": previous}})
     return JSONResponse({"conversation_id": str(conversation_id), "needs_human": False})
+
+
+@app.post("/internal/events")
+async def mybill_event(request: Request, event: events.PaymentEvent) -> Response:
+    """Payment notifications from mybill-service, authenticated with its Google ID token."""
+    settings = get_settings()
+    authorized = await run_in_threadpool(
+        verify_tasks_token,
+        request.headers.get("Authorization"),
+        settings.tasks_target_url.rstrip("/"),
+        settings.mybill_events_sa_email,
+    )
+    if not authorized:
+        logger.warning("Rejected /internal/events: missing or invalid ID token")
+        return Response(status_code=403)
+    try:
+        result = await events.handle(event)
+    except RuntimeError as exc:
+        logger.error("Payment event not delivered", extra={"fields": {"event_id": event.event_id, "error": str(exc)}})
+        return JSONResponse({"status": "send_failed"}, status_code=500)
+    return JSONResponse(result)

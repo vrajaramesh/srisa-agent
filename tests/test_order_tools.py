@@ -195,8 +195,10 @@ async def test_confirm_creates_exactly_one_order(ctx) -> None:
     assert body["measurements"] == {"size_code": "M", "height_cm": 160.0, "fit_preference": "REGULAR"}
     assert draft.status == "submitted" and draft.mybill_order_no == "SB-1001"
     assert ctx.conversation.stage == flow.ORDER_CREATED
-    assert ctx.messenger.of_kind("text")[-1]["text"] == \
-        "🎉 Order SB-1001 created! Total ₹2,149. We'll send your payment link shortly."
+    assert ctx.messenger.of_kind("text")[-1]["text"] == (
+        "🎉 Order SB-1001 created! Total ₹2,149.\n\n"
+        "Pay securely for order SB-1001 (₹2,149) here 👉 https://rzp.io/i/SB-1001\nThe link is valid for 24 hours.")
+    assert ctx.mock.link_calls == 1
 
     ctx.draft = None  # what the worker loads next time: no open draft
     texts_before = len(ctx.messenger.of_kind("text"))
@@ -237,6 +239,41 @@ async def test_mybill_down_at_confirmation(ctx) -> None:
     ctx.mock.unavailable = True
     outcome = await _confirm(ctx, reply_id=f"confirm:{ctx.draft.id}:{ctx.draft.version}")
     assert outcome.kind == "unavailable" and ctx.draft.status == "open"
+
+
+async def test_confirmation_without_payment_link_still_confirms(ctx) -> None:
+    await to_stage(ctx, flow.CONFIRM)
+    await call(ctx, "send_order_summary")
+    ctx.mock.links_unavailable = True
+    outcome = await _confirm(ctx, reply_id=f"confirm:{ctx.draft.id}:{ctx.draft.version}")
+    assert outcome.kind == "created"
+    assert ctx.messenger.of_kind("text")[-1]["text"] == \
+        "🎉 Order SB-1001 created! Total ₹2,149. We'll send your payment link shortly."
+
+
+async def test_order_status_and_resend_payment_link(ctx) -> None:
+    assert (await call(ctx, "get_order_status"))["error"] == "no_order"
+    await to_stage(ctx, flow.CONFIRM)
+    await call(ctx, "send_order_summary")
+    await _confirm(ctx, reply_id=f"confirm:{ctx.draft.id}:{ctx.draft.version}")
+    status = await call(ctx, "get_order_status")
+    assert status["order_no"] == "SB-1001" and status["status"] == "PAYMENT_PENDING"
+    assert status["payment_status"] == "created" and status["payment_link"] == "https://rzp.io/i/SB-1001"
+
+    sent = await call(ctx, "resend_payment_link")
+    assert sent["sent"] and "https://rzp.io/i/SB-1001" in ctx.messenger.of_kind("text")[-1]["text"]
+    assert "rzp.io" not in str(sent)   # the model doesn't need to repeat the URL
+
+    ctx.mock.order_status["SB-1001"] = "PAID"
+    assert (await call(ctx, "resend_payment_link"))["error"] == "already_paid_or_cancelled"
+    assert (await call(ctx, "get_order_status"))["status"] == "PAID"
+
+
+def test_payment_tools_gating() -> None:
+    names = {t.name for t in tools.tools_for_stage(flow.ORDER_CREATED)}
+    assert {"get_order_status", "resend_payment_link"} <= names
+    assert "resend_payment_link" not in {t.name for t in tools.tools_for_stage(flow.BROWSING)}
+    assert "get_order_status" in {t.name for t in tools.tools_for_stage(flow.SIZING)}
 
 
 @pytest.mark.parametrize("text,yes", [("yes", True), ("OK!", True), ("avunu", True), ("👍", True), ("haan.", True),

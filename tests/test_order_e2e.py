@@ -104,7 +104,7 @@ def test_whatsapp_conversation_to_order_created(client: TestClient, router: resp
     assert stage() == "order_created"
     assert draft()["status"] == "submitted" and draft()["mybill_order_no"] == "SB-1001"
     texts = [m["text"]["body"] for m in sent(graph_api) if m.get("type") == "text"]
-    assert texts[-1] == "🎉 Order SB-1001 created! Total ₹2,149. We'll send your payment link shortly."
+    assert texts[-1].startswith("🎉 Order SB-1001 created! Total ₹2,149.") and "https://rzp.io/i/SB-1001" in texts[-1]
 
     before = len(sent(graph_api))
     tap(client, confirm_id, "✅ Confirm")              # double tap

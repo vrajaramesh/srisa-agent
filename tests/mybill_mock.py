@@ -39,6 +39,10 @@ class MybillMock:
         self.measurement_posts: list[dict[str, Any]] = []
         self.quote_calls: list[dict[str, Any]] = []
         self.unavailable = False
+        self.links: dict[str, dict[str, Any]] = {}  # order_no -> link
+        self.link_calls = 0
+        self.links_unavailable = False
+        self.order_status: dict[str, str] = {}  # order_no -> status override
         router.get(f"{BASE}/designs/KUR-101").mock(side_effect=lambda r: self._down() or Response(200, json=KUR_101))
         router.get(url__regex=rf"{BASE}/designs/(?!KUR-101|latest).*").mock(return_value=Response(404, json={}))
         router.get(f"{BASE}/size-chart").mock(side_effect=lambda r: self._down() or Response(200, json=SIZE_CHART))
@@ -47,6 +51,9 @@ class MybillMock:
         router.post(f"{BASE}/customers/512/measurements").mock(side_effect=self._post_measurements)
         router.post(f"{BASE}/orders/quote").mock(side_effect=self._quote)
         router.post(f"{BASE}/orders").mock(side_effect=self._create)
+        router.post(url__regex=rf"{BASE}/orders/SB-\d+/payment-link").mock(side_effect=self._payment_link)
+        router.get(url__regex=rf"{BASE}/orders/SB-\d+/payment").mock(side_effect=self._get_payment)
+        router.get(url__regex=rf"{BASE}/orders/SB-\d+$").mock(side_effect=self._get_order)
 
     def _down(self) -> Response | None:
         return Response(503) if self.unavailable else None
@@ -100,3 +107,34 @@ class MybillMock:
                  "estimated_delivery_date": str(date.today() + timedelta(days=12))}
         self.orders[key] = order
         return Response(201, json=order)
+
+    def _order_by_no(self, order_no: str) -> dict[str, Any] | None:
+        return next((o for o in self.orders.values() if o["order_no"] == order_no), None)
+
+    def _payment_link(self, request: Request) -> Response:
+        order_no = request.url.path.split("/")[-2]
+        self.link_calls += 1
+        if self.links_unavailable:
+            return Response(503)
+        order = self._order_by_no(order_no)
+        if order is None:
+            return Response(404, json={"code": "ORDER_NOT_FOUND"})
+        if self.order_status.get(order_no) == "PAID":
+            return Response(409, json={"code": "ORDER_NOT_PAYABLE", "message": "Order is PAID"})
+        link = self.links.setdefault(order_no, {
+            "order_no": order_no, "order_status": "PAYMENT_PENDING", "status": "created",
+            "short_url": f"https://rzp.io/i/{order_no}", "amount": order["total"], "currency": "INR"})
+        return Response(200, json=link)
+
+    def _get_payment(self, request: Request) -> Response:
+        order_no = request.url.path.split("/")[-2]
+        link = self.links.get(order_no)
+        return Response(200, json=link) if link else Response(404, json={"code": "PAYMENT_NOT_FOUND"})
+
+    def _get_order(self, request: Request) -> Response:
+        order_no = request.url.path.split("/")[-1]
+        order = self._order_by_no(order_no)
+        if order is None:
+            return Response(404, json={})
+        status = self.order_status.get(order_no, "PAYMENT_PENDING" if order_no in self.links else "DRAFT")
+        return Response(200, json={**order, "status": status})

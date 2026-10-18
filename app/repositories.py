@@ -219,3 +219,14 @@ async def last_outbound(session: AsyncSession, conversation_id: uuid.UUID) -> Me
         .limit(1)
     )
     return (await session.execute(stmt)).scalar_one_or_none()
+
+
+async def latest_order_no(session: AsyncSession, conversation_id: uuid.UUID) -> str | None:
+    """mybill order number of the conversation's most recent submitted draft."""
+    stmt = (
+        select(OrderDraft.mybill_order_no)
+        .where(OrderDraft.conversation_id == conversation_id, OrderDraft.mybill_order_no.is_not(None))
+        .order_by(OrderDraft.updated_at.desc())
+        .limit(1)
+    )
+    return (await session.execute(stmt)).scalar_one_or_none()

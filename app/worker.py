@@ -91,6 +91,9 @@ class WorkerStore:
     async def get_draft(self, draft_id: uuid.UUID) -> OrderDraft | None:
         return await self._session.get(OrderDraft, draft_id)
 
+    async def latest_order_no(self, conversation: Conversation) -> str | None:
+        return await repo.latest_order_no(self._session, conversation.id)
+
 
 async def generate_reply(conversation: Conversation, history: list[Message], ctx: tools.ToolContext,
                          settings: AgentSettings) -> AgentResult:

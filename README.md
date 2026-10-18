@@ -88,6 +88,15 @@ browsing ─start_order─▶ sizing ─(size+height+fit)─▶ customise ─fin
   - If she confirms an older version, the current summary is re-sent instead.
 - **The model never sees** customer ids, idempotency keys or totals it didn't receive from a tool result.
 
+### Payments (mybill owns them)
+
+- **On confirmation,** the confirmation message includes mybill's Razorpay Payment Link (`POST /api/agent/orders/{no}/payment-link`, which is idempotent).
+- **Tools:** `get_order_status` answers questions about order and payment status. `resend_payment_link` sends the active link, or a new one if the old link expired.
+- **Notifications from mybill:** `POST /internal/events` receives `order.paid`, `payment_link.expired` and `payment_link.cancelled`.
+  - It requires a Google ID token from mybill-service's runtime account (`MYBILL_EVENTS_SA_EMAIL`, default `276371417285-compute@developer.gserviceaccount.com`), with audience `TASKS_TARGET_URL`.
+  - Each event sends **one** WhatsApp message to the customer, deduplicated by `event_id` in `agent.processed_events` (Alembic `0004`). If the send fails, it returns 500 so mybill retries.
+  - WhatsApp only allows free-form messages within 24 hours of the customer's last message, so a payment made later than that can't be confirmed on WhatsApp (Meta error 131047, logged).
+
 ### Tuning the prompt in your terminal
 
 ```bash

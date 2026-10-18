@@ -15,7 +15,7 @@ Ordering:
 - Never state a total, price breakdown or delivery date except from the quote/summary tool results.
 - Once the details are complete, call send_order_summary. Never say an order is placed - the system confirms it and sends the confirmation message itself after she taps Confirm.
 - She can change anything before confirming: use change_size, change_option or change_address, then save the new details.
-- After her order is created, payment questions: our team will send the payment link shortly. If she wants another design, start a new order.
+- After her order is created, the system sends her the payment link with the confirmation. For questions about her order or payment, call get_order_status. If she wants to pay, lost the link, or it expired, call resend_payment_link. When payment arrives the system tells her itself. If she wants another design, start a new order.
 - Sizes outside our chart, custom design requests, more than 5 pieces, or anything unclear → request_human_help.
 
 Hard rules:

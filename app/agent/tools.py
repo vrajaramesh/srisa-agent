@@ -142,7 +142,7 @@ async def progress(ctx: ToolContext) -> dict[str, Any]:
     if draft and groups:
         result["option_groups_to_choose"] = sorted(groups - flow.chosen_groups(draft, by_group))
     if stage == ORDER_CREATED:
-        result["note"] = "Her order is created. Payment link: our team will send it shortly."
+        result["note"] = "Her order is created. For payment or status questions use get_order_status / resend_payment_link."
     return result
 
 
@@ -201,6 +201,51 @@ async def cancel_order_draft(ctx: ToolContext, args: dict[str, Any]) -> dict[str
     flow.set_stage(ctx.conversation, BROWSING)
     ctx.actions.append({"action": "order_draft_cancelled"})
     return {"ok": True, "stage": BROWSING}
+
+
+async def get_order_status(ctx: ToolContext, args: dict[str, Any]) -> dict[str, Any]:
+    order_no = await ctx.store.latest_order_no(ctx.conversation)
+    if order_no is None:
+        return {"error": "no_order", "note": "She has no confirmed order yet."}
+    if ctx.mybill is None:
+        return _unavailable()
+    try:
+        order = await ctx.mybill.get_order(order_no)
+        payment = await ctx.mybill.get_payment(order_no)
+    except (MybillUnavailable, MybillNotFound):
+        return _unavailable()
+    result: dict[str, Any] = {"order_no": order_no, "status": order["status"], "total": order["total"],
+                              "estimated_delivery_date": order.get("estimated_delivery_date")}
+    if payment:
+        result["payment_status"] = payment["status"]
+        if payment["status"] == "created":
+            result["payment_link"] = payment.get("short_url")
+    result["note"] = {
+        "DRAFT": "Not paid yet - offer the payment link (resend_payment_link).",
+        "PAYMENT_PENDING": "Waiting for payment - she can use the link, or ask for a new one (resend_payment_link).",
+        "PAID": "Paid - the tailor is working on it.",
+    }.get(order["status"], "Tell her the status in simple words.")
+    return result
+
+
+async def resend_payment_link(ctx: ToolContext, args: dict[str, Any]) -> dict[str, Any]:
+    order_no = await ctx.store.latest_order_no(ctx.conversation)
+    if order_no is None:
+        return {"error": "no_order"}
+    if ctx.mybill is None:
+        return _unavailable()
+    try:
+        link = await ctx.mybill.create_payment_link(order_no)
+    except MybillRejected as exc:
+        if exc.code == "ORDER_NOT_PAYABLE":
+            return {"error": "already_paid_or_cancelled", "order_no": order_no}
+        return _unavailable()
+    except (MybillUnavailable, MybillNotFound):
+        return _unavailable()
+    if not await ctx.messenger.send_text(orders.payment_text(order_no, link)):
+        return {"error": "send_failed"}
+    ctx.actions.append({"action": "payment_link_sent", "order_no": order_no})
+    return {"sent": True, "order_no": order_no, "note": "The link is on her screen; don't repeat the URL."}
 
 
 async def request_human_help(ctx: ToolContext, args: dict[str, Any]) -> dict[str, Any]:
@@ -567,6 +612,14 @@ TOOLS: list[Tool] = [
     Tool("cancel_order_draft",
          "Cancel the order in progress when she clearly says she doesn't want to order any more.",
          {"type": "object", "properties": {}}, cancel_order_draft),
+    Tool("get_order_status",
+         "Her latest confirmed order: status (DRAFT, PAYMENT_PENDING, PAID, IN_STITCHING, DISPATCHED, DELIVERED), "
+         "total, payment status and estimated delivery date. Use it for any question about an existing order or payment.",
+         {"type": "object", "properties": {}}, get_order_status),
+    Tool("resend_payment_link",
+         "Send her the payment link for her latest order (a fresh one if the old link expired). Use it when she "
+         "wants to pay, says the link expired, or asks for the link again.",
+         {"type": "object", "properties": {}}, resend_payment_link, frozenset({ORDER_CREATED})),
     Tool("request_human_help",
          "Hand this chat to our shop team: she asks for a person, is upset/complaining, asks about returns, damaged "
          "items, bulk/wholesale (more than 5 pieces), custom designs, sizes outside our chart, when a tool reports "

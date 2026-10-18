@@ -39,6 +39,7 @@ class OrderStore(Protocol):
 
     async def new_draft(self, conversation: Conversation) -> OrderDraft: ...
     async def get_draft(self, draft_id: uuid.UUID) -> OrderDraft | None: ...
+    async def latest_order_no(self, conversation: Conversation) -> str | None: ...
 
 
 def phone_e164(conversation: Conversation) -> str:
@@ -145,6 +146,29 @@ async def send_summary(conversation: Conversation, draft: OrderDraft, mybill: My
                     "the system places the order and sends the confirmation, not you."}
 
 
+# ── Payment links (mybill owns payments; we only ask for the link) ───────────
+
+async def payment_link(mybill: MybillClient, order_no: str) -> dict[str, Any] | None:
+    """mybill's active Razorpay link for the order (or a new one). None if it can't be made right now."""
+    try:
+        return await mybill.create_payment_link(order_no)
+    except (MybillUnavailable, MybillRejected) as exc:
+        logger.error("Payment link unavailable", extra={"fields": {"order_no": order_no, "error": str(exc)}})
+        return None
+
+
+def payment_text(order_no: str, link: dict[str, Any]) -> str:
+    return (f"Pay securely for order {order_no} ({format_rupees(link['amount'])}) here 👉 {link['short_url']}\n"
+            f"The link is valid for 24 hours.")
+
+
+def confirmation_text(order_no: str, total: Any, link: dict[str, Any] | None) -> str:
+    head = f"🎉 Order {order_no} created! Total {format_rupees(total)}."
+    if link and link.get("short_url"):
+        return f"{head}\n\n{payment_text(order_no, link)}"
+    return f"{head} We'll send your payment link shortly."
+
+
 # ── Confirmation (code path) ─────────────────────────────────────────────────
 
 def is_affirmative(text: str | None) -> bool:
@@ -232,8 +256,8 @@ async def confirm(conversation: Conversation, draft: OrderDraft | None, confirme
     previous = (draft.status, draft.mybill_order_no, conversation.stage)
     draft.status, draft.mybill_order_no = DRAFT_SUBMITTED, order["order_no"]
     flow.set_stage(conversation, flow.ORDER_CREATED)
-    text = (f"🎉 Order {order['order_no']} created! Total {format_rupees(order['total'])}. "
-            f"We'll send your payment link shortly.")
+    link = await payment_link(mybill, order["order_no"])
+    text = confirmation_text(order["order_no"], order["total"], link)
     if not await messenger.send_text(text):
         # Not committed as submitted: the retry re-sends with the same idempotency key and gets the same order.
         draft.status, draft.mybill_order_no, conversation.stage = previous

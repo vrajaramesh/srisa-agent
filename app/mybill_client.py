@@ -124,6 +124,20 @@ class MybillClient:
         """DRAFT order in mybill. Same idempotency_key -> same order (safe to retry)."""
         return await self._request("POST", "/api/agent/orders", json=request)
 
+    async def get_order(self, order_no: str) -> dict[str, Any]:
+        return await self._get(f"/api/agent/orders/{order_no}")
+
+    async def create_payment_link(self, order_no: str) -> dict[str, Any]:
+        """Active Razorpay link for the order, or a new one (mybill decides the amount). Idempotent."""
+        return await self._request("POST", f"/api/agent/orders/{order_no}/payment-link")
+
+    async def get_payment(self, order_no: str) -> dict[str, Any] | None:
+        """Latest payment link status, or None if no link was created yet."""
+        try:
+            return await self._get(f"/api/agent/orders/{order_no}/payment")
+        except MybillNotFound:
+            return None
+
     async def _get(self, path: str, params: dict[str, Any] | None = None) -> Any:
         return await self._request("GET", path, params=params)
 

@@ -24,6 +24,10 @@ class MemoryStore:
     async def get_draft(self, draft_id: uuid.UUID) -> OrderDraft | None:
         return self.drafts.get(draft_id)
 
+    async def latest_order_no(self, conversation: Conversation) -> str | None:
+        submitted = [d for d in self.drafts.values() if d.conversation_id == conversation.id and d.mybill_order_no]
+        return submitted[-1].mybill_order_no if submitted else None
+
     def open_draft(self, conversation_id: uuid.UUID) -> OrderDraft | None:
         return next((d for d in self.drafts.values()
                      if d.conversation_id == conversation_id and d.status == DRAFT_OPEN), None)
