@@ -17,7 +17,7 @@ from app import repositories as repo
 from app.config import get_settings
 from app.db import dispose_db, get_sessionmaker, init_db
 from app.logging_setup import setup_logging
-from app.models import RECEIVED, SKIPPED, Conversation
+from app.models import RECEIVED, SKIPPED, Conversation, RawWebhook
 from app.security import tokens_match, verify_admin, verify_signature, verify_tasks_token
 from app.webhook_parser import IncomingMessage, ParsedWebhook, parse_webhook
 
@@ -101,6 +101,50 @@ async def receive_webhook(request: Request, background: BackgroundTasks) -> Resp
         return Response(status_code=500)
 
     await queue.enqueue(conversation_ids, background)  # never raises
+    return Response(status_code=200)
+
+
+@app.get("/webhook/instagram")
+async def verify_instagram_webhook(
+    mode: str | None = Query(None, alias="hub.mode"),
+    token: str | None = Query(None, alias="hub.verify_token"),
+    challenge: str | None = Query(None, alias="hub.challenge"),
+) -> Response:
+    """Meta's subscription handshake for the Instagram webhook (IG_VERIFY_TOKEN, else WA_VERIFY_TOKEN)."""
+    if mode == "subscribe" and tokens_match(token, get_settings().ig_verify_token_value):
+        logger.info("Instagram webhook verified")
+        return PlainTextResponse(challenge or "", status_code=200)
+    logger.warning("Instagram webhook verification failed", extra={"fields": {"mode": mode}})
+    return Response(status_code=403)
+
+
+@app.post("/webhook/instagram")
+async def receive_instagram_webhook(request: Request) -> Response:
+    """Phase 9 step 0: verify the signature and store the raw payload (no parsing, no replies yet)."""
+    raw_body = await request.body()
+    signature = request.headers.get("X-Hub-Signature-256")
+    secrets = get_settings().ig_webhook_secrets
+    if not any(verify_signature(raw_body, signature, secret) for secret in secrets):
+        logger.warning("Rejected Instagram webhook: missing or invalid signature", extra={"fields": {
+            "has_signature": signature is not None, "secrets_tried": len(secrets),
+            "hint": "set IG_APP_SECRET to the Instagram app secret (Instagram > API setup) if this persists"}})
+        return Response(status_code=401)
+    try:
+        payload = json.loads(raw_body)
+    except ValueError:
+        logger.warning("Rejected Instagram webhook: body is not valid JSON")
+        return Response(status_code=400)
+    try:
+        async with get_sessionmaker()() as session, session.begin():
+            session.add(RawWebhook(channel="instagram", payload=payload))
+    except (SQLAlchemyError, OSError):
+        logger.exception("Failed to store Instagram webhook")
+        return Response(status_code=500)
+    entries = payload.get("entry") or [] if isinstance(payload, dict) else []
+    logger.info("Instagram webhook stored", extra={"fields": {
+        "object": payload.get("object") if isinstance(payload, dict) else None,
+        "entries": len(entries),
+        "kinds": sorted({k for e in entries if isinstance(e, dict) for k in e if k not in ("id", "time")})}})
     return Response(status_code=200)
 
 

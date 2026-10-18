@@ -70,7 +70,7 @@ ROOT = Path(__file__).parent.parent
 APP_SECRET = "test-app-secret"
 VERIFY_TOKEN = "test-verify-token"
 MESSAGES_URL = "https://graph.facebook.com/v25.0/106540352242922/messages"
-TABLES = ("conversation_entries", "processed_events", "order_drafts", "llm_turns", "messages", "conversations", "product_links", "ref_codes")
+TABLES = ("raw_webhooks", "conversation_entries", "processed_events", "order_drafts", "llm_turns", "messages", "conversations", "product_links", "ref_codes")
 MYBILL = "https://mybill.test/api/agent"
 
 assert TEST_SCHEMA.endswith("_test")  # guard: we TRUNCATE and DROP this schema

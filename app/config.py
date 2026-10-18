@@ -59,6 +59,11 @@ class Settings(DatabaseSettings, AgentSettings):
     wa_verify_token: SecretStr
     wa_phone_number_id: str
     graph_api_version: str = "v25.0"
+
+    # Instagram (API with Instagram Login). Webhooks may be signed with the Instagram app secret
+    # (Instagram > API setup), which can differ from WA_APP_SECRET; either is accepted.
+    ig_app_secret: SecretStr | None = None
+    ig_verify_token: SecretStr | None = None  # defaults to WA_VERIFY_TOKEN
     log_level: str = "INFO"
     # Comma-separated WhatsApp ids (e.g. "919876543210,919812345678"). When set, the bot
     # replies ONLY to these numbers and just logs everyone else - for safe testing on the
@@ -82,6 +87,15 @@ class Settings(DatabaseSettings, AgentSettings):
 
     admin_api_key: SecretStr | None = None
     admin_allowed_emails: str = ""
+
+    @property
+    def ig_webhook_secrets(self) -> list[str]:
+        """Secrets an Instagram webhook signature may be made with."""
+        return [s.get_secret_value() for s in (self.ig_app_secret, self.wa_app_secret) if s and s.get_secret_value()]
+
+    @property
+    def ig_verify_token_value(self) -> str:
+        return (self.ig_verify_token or self.wa_verify_token).get_secret_value()
 
     @property
     def admin_email_set(self) -> frozenset[str]:

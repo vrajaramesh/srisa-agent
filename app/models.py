@@ -233,3 +233,14 @@ class ProcessedEvent(Base):
     event_type: Mapped[str] = mapped_column(Text)
     order_no: Mapped[str | None] = mapped_column(Text)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class RawWebhook(Base):
+    """Webhook bodies stored as received (Instagram payload capture). Contains customer messages: purge when done."""
+
+    __tablename__ = "raw_webhooks"
+
+    id: Mapped[int] = mapped_column(BigInteger, Identity(), primary_key=True)
+    channel: Mapped[str] = mapped_column(Text)
+    payload: Mapped[dict[str, Any]] = mapped_column(JSONB)
+    received_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
