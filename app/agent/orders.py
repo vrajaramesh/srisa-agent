@@ -13,6 +13,7 @@ from typing import Any, Protocol
 
 from app.agent import flow
 from app.agent.formatting import format_rupees
+from app.agent.resolution import mybill_source_type
 from app.models import DRAFT_OPEN, DRAFT_SUBMITTED, Conversation, Message, OrderDraft
 from app.mybill_client import MybillClient, MybillRejected, MybillUnavailable
 
@@ -76,9 +77,25 @@ def measurements_payload(draft: OrderDraft) -> dict[str, Any]:
     return {k: (float(v) if hasattr(v, "is_finite") else v) for k, v in raw.items() if v not in (None, "")}
 
 
-def order_request(draft: OrderDraft, customer_id: int, channel: str = "WHATSAPP") -> dict[str, Any]:
+def order_attribution(conversation: Conversation | None) -> dict[str, Any]:
+    """source_type / source_id / ctwa_clid from the conversation's newest ad / post entry ({} if organic).
+    mybill only accepts a numeric source_id, so anything else is left out."""
+    if conversation is None:
+        return {}
+    source_type = mybill_source_type(conversation.entry_source_type)
+    if not source_type or not (conversation.entry_source_id or "").isdigit():
+        return {}
+    out: dict[str, Any] = {"source_type": source_type, "source_id": conversation.entry_source_id}
+    if conversation.entry_ctwa_clid:
+        out["ctwa_clid"] = conversation.entry_ctwa_clid[:500]
+    return out
+
+
+def order_request(draft: OrderDraft, customer_id: int, channel: str = "WHATSAPP",
+                  conversation: Conversation | None = None) -> dict[str, Any]:
     """POST /api/agent/orders body. The idempotency key ties the order to this exact draft version."""
     return {
+        **order_attribution(conversation),
         **quote_request(draft),
         "customer_id": customer_id,
         "measurements": measurements_payload(draft),
@@ -246,7 +263,7 @@ async def confirm(conversation: Conversation, draft: OrderDraft | None, confirme
         if customer_id is None:
             customer_id = (await mybill.upsert_customer(phone_e164(conversation), conversation.customer_name))["customer_id"]
             conversation.mybill_customer_id = draft.mybill_customer_id = customer_id
-        order = await mybill.create_order(order_request(draft, customer_id))
+        order = await mybill.create_order(order_request(draft, customer_id, conversation=conversation))
     except MybillUnavailable as exc:
         return ConfirmOutcome("unavailable", detail=str(exc))
     except MybillRejected as exc:

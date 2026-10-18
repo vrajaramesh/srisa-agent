@@ -1,0 +1,48 @@
+{
+  "object": "whatsapp_business_account",
+  "entry": [
+    {
+      "id": "1126949440022089",
+      "changes": [
+        {
+          "field": "messages",
+          "value": {
+            "messaging_product": "whatsapp",
+            "metadata": {
+              "display_phone_number": "919491647691",
+              "phone_number_id": "106540352242922"
+            },
+            "contacts": [
+              {
+                "profile": {
+                  "name": "Asha Rao"
+                },
+                "wa_id": "919876543210"
+              }
+            ],
+            "messages": [
+              {
+                "referral": {
+                  "source_url": "https://www.instagram.com/p/DAbCdEfGhIj/",
+                  "source_id": "17912345678901234",
+                  "source_type": "post",
+                  "body": "New in: Rose Anarkali KUR-101 💗",
+                  "headline": "srisa.boutique",
+                  "media_type": "image",
+                  "image_url": "https://scontent.cdninstagram.com/v/rose.jpg"
+                },
+                "from": "919876543210",
+                "id": "wamid.HBgMOTE5ODc2NTQzMjEwFQIAEhggUE9TVAA=",
+                "timestamp": "1760700000",
+                "type": "text",
+                "text": {
+                  "body": "Hi! Can I get more info on this?"
+                }
+              }
+            ]
+          }
+        }
+      ]
+    }
+  ]
+}

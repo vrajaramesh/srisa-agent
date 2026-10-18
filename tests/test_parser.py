@@ -35,3 +35,44 @@ def test_parse_empty_or_malformed_payload() -> None:
     assert parse_webhook({"entry": [{"changes": [{"value": None}]}]}).messages == []
     assert parse_webhook({"entry": [{"changes": [{"value": {"messages": [{"type": "text"}]}}]}]}).messages == []
 
+
+
+# ── Click-to-WhatsApp referrals ──────────────────────────────────────────────
+
+def test_parse_referral_image_ad() -> None:
+    msg = parse_webhook(load_fixture("referral_image.json")).messages[0]
+    ref = msg.referral
+    assert ref is not None and ref.is_ad
+    assert ref.source_id == "120210000000000001" and ref.source_type == "ad"
+    assert ref.source_url == "https://fb.me/3cr4Wqqkv"
+    assert ref.headline == "Diwali Collection – Mustard Kurti"
+    assert ref.body.startswith("Mustard yellow Anarkali")
+    assert ref.media_type == "image" and ref.image_url.endswith("mustard.jpg") and ref.video_url is None
+    assert ref.ctwa_clid.startswith("ARAkLkA8")
+    assert ref.welcome_text == "Hi 👋 Welcome to SRISA Boutique! How can we help you?"
+    assert msg.text == "Hi! Can I get more info on this?"
+    assert msg.raw["referral"]["source_id"] == "120210000000000001"   # raw JSON kept
+
+
+def test_parse_referral_video_ad() -> None:
+    ref = parse_webhook(load_fixture("referral_video.json")).messages[0].referral
+    assert ref.media_type == "video"
+    assert ref.video_url.endswith("mustard.mp4") and ref.thumbnail_url.endswith("mustard_thumb.jpg")
+    assert ref.image_url is None
+    assert ref.ctwa_clid == "ARBvGQ3pN0rQe1e8kDkQ_VIDEO_CLICK_ID"
+
+
+def test_parse_referral_without_clid_or_welcome() -> None:
+    ref = parse_webhook(load_fixture("referral_no_clid.json")).messages[0].referral
+    assert ref is not None and ref.is_ad
+    assert ref.ctwa_clid is None and ref.welcome_text is None
+
+
+def test_parse_referral_instagram_post() -> None:
+    ref = parse_webhook(load_fixture("referral_post.json")).messages[0].referral
+    assert ref.source_type == "post" and not ref.is_ad
+    assert ref.source_id == "17912345678901234"
+
+
+def test_plain_message_has_no_referral() -> None:
+    assert parse_webhook(load_fixture("text_message.json")).messages[0].referral is None

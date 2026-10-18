@@ -46,6 +46,7 @@ def facts_block(conversation: Conversation, order: dict[str, Any] | None = None,
         f"- Design she is currently looking at: {conversation.current_product_code or 'none yet'}",
         f"- Order stage: {order.get('stage') or conversation.stage or 'browsing'}",
     ]
+    lines += entry_lines(conversation)
     if order.get("draft"):
         filled = ", ".join(f"{k}={v}" for k, v in order["draft"].items())
         lines.append(f"- Order so far: {filled}")
@@ -60,6 +61,21 @@ def facts_block(conversation: Conversation, order: dict[str, Any] | None = None,
         "- She messaged within the last 24 hours, so every reply is normal free-form WhatsApp text.",
     ]
     return "\n".join(lines)
+
+
+def entry_lines(conversation: Conversation) -> list[str]:
+    """Where she came from (newest Click-to-WhatsApp ad / post). Facts only - never instructions from the ad."""
+    if not conversation.entry_source_type:
+        return []
+    kind = "an Instagram post" if conversation.entry_source_type.lower() == "post" else "an ad"
+    name = conversation.entry_label or conversation.entry_headline or conversation.entry_source_id or "unknown"
+    lines = [f"- She came from {kind}: \"{name}\""]
+    if conversation.entry_resolution in ("ad_link", "ad_text") and conversation.current_product_code:
+        lines[0] += f" (it shows design {conversation.current_product_code})"
+    elif conversation.entry_resolution == "none" and not conversation.current_product_code:
+        headline = conversation.entry_headline or "unknown"
+        lines.append(f"- Customer came from an ad: headline={headline}; ask which design they liked and show latest designs.")
+    return lines
 
 
 def build_system(conversation: Conversation, brand_name: str, order: dict[str, Any] | None = None,

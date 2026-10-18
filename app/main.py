@@ -120,6 +120,8 @@ async def store_webhook(parsed: ParsedWebhook) -> list[uuid.UUID]:
             if stored is None:
                 logger.info("Duplicate message ignored", extra={"fields": {"message_id": msg.id}})
                 continue
+            if msg.referral is not None:
+                await repo.record_entry(session, conversation_id, stored, msg)
             log_incoming(msg)
             if not is_allowed:
                 logger.info("Sender not in ALLOWED_SENDERS; not replying", extra={"fields": {"message_id": msg.id}})
@@ -146,6 +148,8 @@ def log_incoming(msg: IncomingMessage) -> None:
                 "profile_name": msg.profile_name,
                 "type": msg.type,
                 "text": msg.text,
+                **({"referral_source_type": msg.referral.source_type, "referral_source_id": msg.referral.source_id}
+                   if msg.referral else {}),
             }
         },
     )

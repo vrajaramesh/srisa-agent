@@ -97,6 +97,35 @@ browsing ─start_order─▶ sizing ─(size+height+fit)─▶ customise ─fin
   - Each event sends **one** WhatsApp message to the customer, deduplicated by `event_id` in `agent.processed_events` (Alembic `0004`). If the send fails, it returns 500 so mybill retries.
   - WhatsApp only allows free-form messages within 24 hours of the customer's last message, so a payment made later than that can't be confirmed on WhatsApp (Meta error 131047, logged).
 
+### Click-to-WhatsApp ad referrals
+
+When a customer taps a Click-to-WhatsApp ad (or an Instagram post's WhatsApp button), her first message carries a `referral`.
+
+- **Stored:** the newest referral on the conversation (`entry_*`) and every one in `agent.conversation_entries` (Alembic 0005). The raw JSON stays in `messages.raw`.
+- **Design resolution** (`agent/resolution.py`, before the model; the first hit wins):
+  1. mybill marketing link for the ad id (`GET /api/agent/marketing-links/resolve`, cached 10 min, 404s 1 min),
+  2. a design code in the ad's body or headline,
+  3. a design code in her text.
+
+  The method is saved in `entry_resolution`.
+- **First reply** (`agent/ad_entry.py`, no model call): if a design was found and the conversation is new (or quiet for 7+ days), code sends the design's first photo ("<name> – ₹<price> · stitched to your size in N days 🧵") and the buttons 🛍️ Order this / 📸 More photos / 📏 Size guide. A greeting line is added only if the ad had no welcome message.
+  - `ad:order` runs start_order, `ad:photos` runs send_design_photos, then the model continues. "Size guide" is answered by the model with get_size_chart.
+- **Unresolved ads** go to the model; the facts block says which ad she came from and asks the model to show the latest designs.
+- **Events and attribution:**
+  - A `conversation_started` event goes to mybill (`POST /api/agent/marketing-events`) without delaying the reply.
+  - Orders carry `source_type`, `source_id` and `ctwa_clid` (mybill's Ad performance report).
+- **FEP:** `fep_expires_at` = our first reply + 72h, set only for ad entries answered within 24h. Use `agent/fep.py::is_free_template_window` for later reminders.
+
+Test without a real ad (the bot really replies on WhatsApp, so use your own number, listed in `ALLOWED_SENDERS`):
+
+```bash
+python scripts/send_fake_referral.py --url http://localhost:8000/webhook/whatsapp \
+  --phone 9198XXXXXXXX --ad-id 120210000000000001 --text "Hi! Can I get more info on this?"
+# --no-welcome (bot adds a greeting), --no-clid, --media video, --source-type post, --body "New: KUR-101"
+```
+
+Map the ad id to a design first in mybill-ui → **Ad & post links**, or put a design code in `--body`.
+
 ### Tuning the prompt in your terminal
 
 ```bash

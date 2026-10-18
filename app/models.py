@@ -59,10 +59,43 @@ class Conversation(Base):
     # Why the bot handed over (e.g. "ready_to_order", "llm_failure: timeout"). Cleared on resume.
     needs_human_reason: Mapped[str | None] = mapped_column(Text)
     last_customer_message_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # Newest Click-to-WhatsApp ad / post referral (history in conversation_entries). source_type "ad" | "post".
+    entry_source_type: Mapped[str | None] = mapped_column(Text)
+    entry_source_id: Mapped[str | None] = mapped_column(Text)
+    entry_ctwa_clid: Mapped[str | None] = mapped_column(Text)
+    entry_headline: Mapped[str | None] = mapped_column(Text)
+    entry_label: Mapped[str | None] = mapped_column(Text)  # mybill marketing link label, when the ad is mapped
+    # How the entry's design was found: ad_link | ad_text | message_text | none (NULL = not resolved yet)
+    entry_resolution: Mapped[str | None] = mapped_column(Text)
+    entry_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # Free entry point window (ad entries only): our first reply + 72h. See app/agent/fep.py.
+    fep_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
     )
+
+
+class ConversationEntry(Base):
+    """Every ad / post referral a conversation came in through (the conversation keeps only the newest)."""
+
+    __tablename__ = "conversation_entries"
+
+    id: Mapped[int] = mapped_column(BigInteger, Identity(), primary_key=True)
+    conversation_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("conversations.id", ondelete="CASCADE")
+    )
+    message_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("messages.id", ondelete="SET NULL"))
+    source_type: Mapped[str | None] = mapped_column(Text)
+    source_id: Mapped[str | None] = mapped_column(Text)
+    source_url: Mapped[str | None] = mapped_column(Text)
+    headline: Mapped[str | None] = mapped_column(Text)
+    body: Mapped[str | None] = mapped_column(Text)
+    media_type: Mapped[str | None] = mapped_column(Text)
+    ctwa_clid: Mapped[str | None] = mapped_column(Text)
+    welcome_text: Mapped[str | None] = mapped_column(Text)
+    raw: Mapped[dict[str, Any] | None] = mapped_column(JSONB)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 
 class Message(Base):

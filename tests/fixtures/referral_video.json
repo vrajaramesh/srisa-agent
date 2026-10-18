@@ -1,0 +1,53 @@
+{
+  "object": "whatsapp_business_account",
+  "entry": [
+    {
+      "id": "1126949440022089",
+      "changes": [
+        {
+          "field": "messages",
+          "value": {
+            "messaging_product": "whatsapp",
+            "metadata": {
+              "display_phone_number": "919491647691",
+              "phone_number_id": "106540352242922"
+            },
+            "contacts": [
+              {
+                "profile": {
+                  "name": "Asha Rao"
+                },
+                "wa_id": "919876543210"
+              }
+            ],
+            "messages": [
+              {
+                "referral": {
+                  "source_url": "https://fb.me/3cr4Wqqkv",
+                  "source_id": "120210000000000001",
+                  "source_type": "ad",
+                  "body": "Mustard yellow Anarkali kurti, stitched to your size. Free delivery above ₹2,500.",
+                  "headline": "Diwali Collection – Mustard Kurti",
+                  "media_type": "video",
+                  "video_url": "https://video.xx.fbcdn.net/v/t42.1790-2/mustard.mp4",
+                  "thumbnail_url": "https://scontent.xx.fbcdn.net/v/t15.5256-10/mustard_thumb.jpg",
+                  "ctwa_clid": "ARBvGQ3pN0rQe1e8kDkQ_VIDEO_CLICK_ID",
+                  "welcome_message": {
+                    "text": "Hi 👋 Thanks for watching!"
+                  }
+                },
+                "from": "919876543210",
+                "id": "wamid.HBgMOTE5ODc2NTQzMjEwFQIAEhggQURfVklERU8A",
+                "timestamp": "1760700000",
+                "type": "text",
+                "text": {
+                  "body": "Hi! Can I get more info on this?"
+                }
+              }
+            ]
+          }
+        }
+      ]
+    }
+  ]
+}

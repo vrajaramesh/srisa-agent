@@ -29,6 +29,31 @@ from typing import Any
 
 
 @dataclass(frozen=True)
+class Referral:
+    """Click-to-WhatsApp ad / post the customer tapped to start the chat (`messages[].referral`).
+
+    Present only on the first message after the tap. source_type is "ad" or "post"; ctwa_clid is Meta's click id
+    (missing for some placements); welcome_message is the greeting the customer already saw in WhatsApp.
+    """
+
+    source_id: str | None = None
+    source_type: str | None = None
+    source_url: str | None = None
+    headline: str | None = None
+    body: str | None = None
+    media_type: str | None = None
+    image_url: str | None = None
+    video_url: str | None = None
+    thumbnail_url: str | None = None
+    ctwa_clid: str | None = None
+    welcome_text: str | None = None
+
+    @property
+    def is_ad(self) -> bool:
+        return (self.source_type or "").lower() == "ad"
+
+
+@dataclass(frozen=True)
 class IncomingMessage:
     """A customer message, normalised."""
 
@@ -40,6 +65,7 @@ class IncomingMessage:
     profile_name: str | None = None  # from value.contacts[]
     phone_number_id: str | None = None  # which of our numbers received it
     reply_id: str | None = None  # id of a tapped reply button / list row; its title is in text
+    referral: Referral | None = None  # set when the chat was opened from a Click-to-WhatsApp ad / post
     raw: dict[str, Any] = field(default_factory=dict, compare=False, repr=False)  # original JSON
 
 
@@ -101,7 +127,36 @@ def _parse_message(raw: dict[str, Any], names: dict[str, str], phone_number_id: 
         profile_name=names.get(sender),
         phone_number_id=phone_number_id,
         reply_id=reply_id,
+        referral=parse_referral(raw.get("referral")),
         raw=raw,
+    )
+
+
+def _str(value: Any) -> str | None:
+    """Non-empty string or None (ids sometimes arrive as numbers)."""
+    if value is None or isinstance(value, (dict, list)):
+        return None
+    text = str(value).strip()
+    return text or None
+
+
+def parse_referral(raw: Any) -> Referral | None:
+    """`messages[].referral` -> Referral, or None if absent/malformed."""
+    if not isinstance(raw, dict) or not raw:
+        return None
+    welcome = raw.get("welcome_message")
+    return Referral(
+        source_id=_str(raw.get("source_id")),
+        source_type=_str(raw.get("source_type")),
+        source_url=_str(raw.get("source_url")),
+        headline=_str(raw.get("headline")),
+        body=_str(raw.get("body")),
+        media_type=_str(raw.get("media_type")),
+        image_url=_str(raw.get("image_url")),
+        video_url=_str(raw.get("video_url")),
+        thumbnail_url=_str(raw.get("thumbnail_url")),
+        ctwa_clid=_str(raw.get("ctwa_clid")),
+        welcome_text=_str(welcome.get("text")) if isinstance(welcome, dict) else None,
     )
 
 

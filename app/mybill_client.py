@@ -138,6 +138,18 @@ class MybillClient:
         except MybillNotFound:
             return None
 
+    async def resolve_marketing_link(self, source_type: str, source_id: str) -> dict[str, Any] | None:
+        """Design an ad / post promotes -> {design_code, label}, or None (unknown or deactivated link).
+        source_type is mybill's AD | IG_MEDIA."""
+        try:
+            return await self._get("/api/agent/marketing-links/resolve", params={"type": source_type, "id": source_id})
+        except MybillNotFound:
+            return None
+
+    async def report_marketing_event(self, event: dict[str, Any]) -> dict[str, Any]:
+        """conversation_started for the Ad performance report. Idempotent on ctwa_clid."""
+        return await self._request("POST", "/api/agent/marketing-events", json=event)
+
     async def _get(self, path: str, params: dict[str, Any] | None = None) -> Any:
         return await self._request("GET", path, params=params)
 

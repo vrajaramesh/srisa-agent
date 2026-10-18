@@ -4,6 +4,7 @@ Kept separate from the HTTP route so it can be called by the Cloud Tasks endpoin
 local BackgroundTask fallback, and tests alike.
 """
 
+import asyncio
 import logging
 import uuid
 from dataclasses import dataclass
@@ -14,7 +15,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app import mybill_client, whatsapp_client
 from app import repositories as repo
-from app.agent import orders, resolution, tools
+from app.agent import ad_entry, fep, orders, resolution, tools
 from app.agent.formatting import split_message
 from app.agent.runner import AgentResult, run_agent
 from app.config import AgentSettings, get_settings
@@ -25,6 +26,7 @@ logger = logging.getLogger(__name__)
 
 FALLBACK_REPLY = "Thank you! Our team will get back to you shortly 🙏"
 MAX_ATTEMPTS = 5  # matches the Cloud Tasks queue's max-attempts
+EVENT_TIMEOUT_SECONDS = 3  # marketing events are awaited at most this long, after the reply went out
 
 # Taps applied by code before the model runs (then the model continues the conversation).
 SHORTCUTS = {"size": ("save_size", "size_code"), "fit": ("save_size", "fit_preference"),
@@ -46,6 +48,7 @@ class WorkerMessenger:
     def __init__(self, session: AsyncSession, conversation: Conversation) -> None:
         self._session, self._conversation = session, conversation
         self.error: str | None = None
+        self.sent = 0  # messages successfully sent in this run
 
     def _record(self, sent: whatsapp_client.SendResult, text: str, message_type: str, meta: dict | None) -> bool:
         if not sent.ok:
@@ -53,6 +56,7 @@ class WorkerMessenger:
             return False
         repo.add_outbound_message(self._session, self._conversation.id, text, sent.message_id,
                                   {**(sent.data or {}), **(meta or {})}, message_type=message_type)
+        self.sent += 1
         return True
 
     async def send_text(self, text: str) -> bool:
@@ -128,6 +132,20 @@ async def process_conversation(conversation_id: uuid.UUID) -> ProcessResult:
     - WhatsApp send failure / mybill down during confirmation: messages are marked failed (attempts + 1) and
       failed=True is returned, so Cloud Tasks retries; after MAX_ATTEMPTS they are skipped.
     """
+    background: list[asyncio.Task] = []
+    try:
+        return await _process(conversation_id, background)
+    finally:
+        # Fire-and-forget work (marketing events) started during the run: give it a few seconds after the
+        # reply went out, so Cloud Run doesn't freeze it once the request ends. Never fails the run.
+        if background:
+            await asyncio.wait(background, timeout=EVENT_TIMEOUT_SECONDS)
+            for task in background:
+                if not task.done():
+                    task.cancel()
+
+
+async def _process(conversation_id: uuid.UUID, background: list[asyncio.Task]) -> ProcessResult:
     settings = get_settings()
     result = ProcessResult()
     async with get_sessionmaker()() as session, session.begin():
@@ -157,13 +175,21 @@ async def process_conversation(conversation_id: uuid.UUID) -> ProcessResult:
         ctx = tools.ToolContext(conversation=conversation, mybill=mybill, messenger=messenger,
                                 store=WorkerStore(session), draft=await repo.open_draft(session, conversation_id))
 
+        entry_msg, referral = ad_entry.entry_message(pending)
         error = await _confirmation_path(session, ctx, pending, mybill)
+        if error is None and referral is not None:
+            error = await _ad_entry_path(session, ctx, pending, entry_msg, referral, background)
         if error is None:
-            error = await _agent_path(session, ctx, pending, settings)
+            error = await _agent_path(session, ctx, pending, settings, resolved=referral is not None)
         if error == "handled":
             error = None
 
         now = datetime.now(timezone.utc)
+        if not error and referral is not None and messenger.sent and fep.opens_fep(
+                conversation, ad_entry.message_time(entry_msg), now):
+            conversation.fep_expires_at = fep.fep_expiry(now)
+            logger.info("Free entry point window opened", extra={"fields": {
+                "conversation_id": str(conversation_id), "expires_at": conversation.fep_expires_at.isoformat()}})
         for message in pending:
             if error:
                 message.status, message.attempts, message.last_error = FAILED, message.attempts + 1, error
@@ -205,12 +231,47 @@ async def _confirmation_path(session: AsyncSession, ctx: tools.ToolContext, pend
     return "handled"
 
 
-async def _agent_path(session: AsyncSession, ctx: tools.ToolContext, pending: list[Message],
-                      settings: AgentSettings) -> str | None:
-    """Shortcuts, then the AI agent; sends its reply. Returns None on success or an error string (-> retry)."""
+async def _report_event(mybill: Any, event: dict[str, Any]) -> None:
+    try:
+        await mybill.report_marketing_event(event)
+        logger.info("Marketing event reported", extra={"fields": {"source_id": event.get("source_id")}})
+    except Exception as exc:  # reporting must never affect the conversation
+        logger.warning("Marketing event not reported", extra={"fields": {"error": repr(exc)}})
+
+
+async def _ad_entry_path(session: AsyncSession, ctx: tools.ToolContext, pending: list[Message], entry_msg: Message,
+                         referral: Any, background: list[asyncio.Task]) -> str | None:
+    """Chat opened from an ad / post: resolve the design (ad link, ad text, her text), report the conversation,
+    and for a fresh start send the deterministic first reply. Returns "handled", an error (-> retry), or None
+    (the model continues; the facts block tells it about the ad)."""
     conversation = ctx.conversation
+    resolved = await resolution.resolve_entry(conversation, referral,
+                                              [m.text for m in pending if not m.reply_id], ctx.mybill)
+    if entry_msg.attempts == 0 and ctx.mybill is not None:
+        event = ad_entry.marketing_event(conversation, referral, ad_entry.message_time(entry_msg))
+        if event:
+            background.append(asyncio.create_task(_report_event(ctx.mybill, event)))
+    if resolved.design is None:
+        return None
+    previous = await repo.previous_inbound_at(session, conversation.id, entry_msg)
+    if not ad_entry.is_fresh_start(previous, entry_msg):
+        return None
+    if not await ad_entry.send_first_reply(ctx, referral, resolved.design):
+        return ctx.messenger.error or "send failed"
+    logger.info("Ad first reply sent", extra={"fields": {"conversation_id": str(conversation.id),
+                                                         "code": resolved.design.get("code")}})
+    return "handled"
+
+
+async def _agent_path(session: AsyncSession, ctx: tools.ToolContext, pending: list[Message],
+                      settings: AgentSettings, resolved: bool = False) -> str | None:
+    """Shortcuts, then the AI agent; sends its reply. Returns None on success or an error string (-> retry).
+    resolved=True: the ad entry path already resolved the design for these messages."""
+    conversation = ctx.conversation
+    await ad_entry.apply_taps(ctx, pending)
     await apply_shortcuts(ctx, pending)
-    await resolution.resolve_design_code(conversation, [m.text for m in pending if not m.reply_id], ctx.mybill)
+    if not resolved:
+        await resolution.resolve_design_code(conversation, [m.text for m in pending if not m.reply_id], ctx.mybill)
     history = await repo.agent_history(session, conversation.id, settings.history_messages)
     agent = await generate_reply(conversation, history, ctx, settings)
     repo.add_llm_turn(session, conversation.id, agent)

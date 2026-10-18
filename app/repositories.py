@@ -18,6 +18,7 @@ from app.models import (
     SENT,
     SKIPPED,
     Conversation,
+    ConversationEntry,
     LlmTurn,
     Message,
     OrderDraft,
@@ -227,6 +228,40 @@ async def latest_order_no(session: AsyncSession, conversation_id: uuid.UUID) -> 
         select(OrderDraft.mybill_order_no)
         .where(OrderDraft.conversation_id == conversation_id, OrderDraft.mybill_order_no.is_not(None))
         .order_by(OrderDraft.updated_at.desc())
+        .limit(1)
+    )
+    return (await session.execute(stmt)).scalar_one_or_none()
+
+
+async def record_entry(session: AsyncSession, conversation_id: uuid.UUID, message_id: uuid.UUID,
+                       msg: IncomingMessage) -> None:
+    """Store an ad / post referral: a history row, and the conversation's entry_* fields (newest wins).
+    entry_resolution and fep_expires_at are reset - a new ad click starts a new entry (the worker fills them)."""
+    ref = msg.referral
+    if ref is None:
+        return
+    session.add(ConversationEntry(
+        conversation_id=conversation_id, message_id=message_id, source_type=ref.source_type,
+        source_id=ref.source_id, source_url=ref.source_url, headline=ref.headline, body=ref.body,
+        media_type=ref.media_type, ctwa_clid=ref.ctwa_clid, welcome_text=ref.welcome_text,
+        raw=(msg.raw or {}).get("referral"),
+    ))
+    await session.execute(
+        update(Conversation)
+        .where(Conversation.id == conversation_id)
+        .values(entry_source_type=ref.source_type, entry_source_id=ref.source_id, entry_ctwa_clid=ref.ctwa_clid,
+                entry_headline=ref.headline, entry_label=None, entry_resolution=None, entry_at=_message_time(msg),
+                fep_expires_at=None)
+    )
+
+
+async def previous_inbound_at(session: AsyncSession, conversation_id: uuid.UUID, before: Message) -> datetime | None:
+    """When the customer last wrote before `before` (None = `before` starts the conversation)."""
+    stmt = (
+        select(Message.created_at)
+        .where(Message.conversation_id == conversation_id, Message.direction == INBOUND,
+               Message.created_at < before.created_at)
+        .order_by(Message.created_at.desc())
         .limit(1)
     )
     return (await session.execute(stmt)).scalar_one_or_none()

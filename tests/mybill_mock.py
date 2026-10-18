@@ -43,6 +43,10 @@ class MybillMock:
         self.link_calls = 0
         self.links_unavailable = False
         self.order_status: dict[str, str] = {}  # order_no -> status override
+        self.marketing_links: dict[tuple[str, str], dict[str, Any]] = {}  # (AD|IG_MEDIA, id) -> {design_code, label}
+        self.resolve_calls: list[tuple[str, str]] = []
+        self.events: list[dict[str, Any]] = []
+        self.resolve_unavailable = False
         router.get(f"{BASE}/designs/KUR-101").mock(side_effect=lambda r: self._down() or Response(200, json=KUR_101))
         router.get(url__regex=rf"{BASE}/designs/(?!KUR-101|latest).*").mock(return_value=Response(404, json={}))
         router.get(f"{BASE}/size-chart").mock(side_effect=lambda r: self._down() or Response(200, json=SIZE_CHART))
@@ -54,6 +58,21 @@ class MybillMock:
         router.post(url__regex=rf"{BASE}/orders/SB-\d+/payment-link").mock(side_effect=self._payment_link)
         router.get(url__regex=rf"{BASE}/orders/SB-\d+/payment").mock(side_effect=self._get_payment)
         router.get(url__regex=rf"{BASE}/orders/SB-\d+$").mock(side_effect=self._get_order)
+        router.get(f"{BASE}/marketing-links/resolve").mock(side_effect=self._resolve)
+        router.post(f"{BASE}/marketing-events").mock(side_effect=self._event)
+
+    def _resolve(self, request: Request) -> Response:
+        key = (request.url.params["type"], request.url.params["id"])
+        self.resolve_calls.append(key)
+        if self.resolve_unavailable:
+            return Response(503)
+        link = self.marketing_links.get(key)
+        return Response(200, json=link) if link else Response(404, json={"code": "MARKETING_LINK_NOT_FOUND"})
+
+    def _event(self, request: Request) -> Response:
+        body = json.loads(request.content)
+        self.events.append(body)
+        return Response(201, json={"event_id": len(self.events), "created": True})
 
     def _down(self) -> Response | None:
         return Response(503) if self.unavailable else None
