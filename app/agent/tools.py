@@ -670,7 +670,7 @@ TOOLS: list[Tool] = [
          "Remember which design she is currently interested in (checked against our catalog).",
          {"type": "object", "properties": {"code": _CODE}, "required": ["code"]}, set_current_design, SHOPPING),
     Tool("get_size_chart",
-         "Our size chart (XS-XXL) with body bust, waist, hip, shoulder and length in inches.",
+         "Our size chart (XS to 4XL) with body bust, waist, hip, shoulder and length in inches.",
          {"type": "object", "properties": {}}, get_size_chart, frozenset({BROWSING, ORDER_CREATED, SIZING})),
     Tool("start_order",
          "Start an order for a design when she says she wants to order/buy it. Tells you whether she has saved "
