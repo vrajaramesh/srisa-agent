@@ -4,7 +4,6 @@ import copy
 import json
 import uuid
 from datetime import datetime, timezone
-from urllib.parse import unquote
 
 import pytest
 import respx
@@ -80,9 +79,8 @@ def test_buying_comment_gets_private_dm_with_whatsapp_link_and_public_reply(clie
     text = dm["message"]["text"]
     assert text.startswith("Hi @asha.styles! 😊 Thanks for your interest in Anarkali Kurta (KUR-101) – ₹1,899, "
                            "stitched to your size in 7 days 🧵")
-    link = next(line for line in text.splitlines() if line.startswith("https://wa.me/919491647691?text="))
     ref = run_sql(f"SELECT code, ig_user_id, design_code FROM {TEST_SCHEMA}.ref_codes")[0]
-    assert unquote(link.split("text=")[1]) == f"Hi SRISA! I'd like to order KUR-101 🛍️ (ref {ref['code']})"
+    assert f"\nhttps://srisafabrics.com/wa/KUR-101/{ref['code']}\n" in text      # short, clickable on Instagram
     assert ref["ig_user_id"] == CUSTOMER and ref["design_code"] == "KUR-101"
 
     public = ig["replies"].calls[0].request
@@ -130,7 +128,7 @@ def test_unknown_design_still_sends_whatsapp_link(client: TestClient, router: re
     cid = post_comment(client, "price?")
     text = json.loads(sends.calls[0].request.content)["message"]["text"]
     assert "Thanks for your comment." in text and "tell us which design you liked" in text
-    assert "I%27d%20like%20to%20place%20an%20order" in text
+    assert "\nhttps://srisafabrics.com/wa/IG-" in text
     assert comment_row(cid)["design_code"] is None
 
 

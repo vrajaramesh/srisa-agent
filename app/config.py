@@ -36,6 +36,9 @@ class AgentSettings(BaseSettings):
     brand_name: str = "SRISA Boutique"
     # The shop's WhatsApp number (digits) for the "Order on WhatsApp" link sent on Instagram.
     whatsapp_order_number: str = "919491647691"
+    # Short redirect to the pre-typed WhatsApp order message, for text links on Instagram (long wa.me links aren't
+    # clickable there): {order_link_base}/KUR-101/IG-7K3QA. Served by the shop site (mybill-ecom nginx). Empty = wa.me.
+    order_link_base: str = "https://srisafabrics.com/wa"
     # This service's public URL, for short links like {public_base_url}/wa/IG-7K3QA (empty = full wa.me links).
     public_base_url: str = ""
 

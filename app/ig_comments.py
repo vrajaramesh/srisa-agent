@@ -132,7 +132,8 @@ async def process_comment(comment_id: str) -> str:
         if code:
             conversation.current_product_code = code
         ref = await repo.create_ref_code(session, row.from_id, code)
-        link = ig_handoff.whatsapp_link(settings.whatsapp_order_number, ig_handoff.prefilled_text(code, ref))
+        link = (ig_handoff.short_link(settings.order_link_base, code, ref) if settings.order_link_base
+                else ig_handoff.whatsapp_link(settings.whatsapp_order_number, ig_handoff.prefilled_text(code, ref)))
         text = private_text(row.username, design, link)
 
         sent = await instagram.InstagramAdapter().send_private_reply(comment_id, text)

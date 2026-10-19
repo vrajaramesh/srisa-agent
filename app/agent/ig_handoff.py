@@ -36,6 +36,12 @@ def whatsapp_link(number: str, text: str) -> str:
     return f"https://wa.me/{digits}?text={quote(text)}"
 
 
+def short_link(base: str, design_code: str | None, ref: str) -> str:
+    """{base}/KUR-101/IG-7K3QA (or {base}/IG-7K3QA): redirects to WhatsApp with prefilled_text(design_code, ref)."""
+    base = base.rstrip("/")
+    return f"{base}/{design_code}/{ref}" if design_code else f"{base}/{ref}"
+
+
 def find_ref(pending: list[Message]) -> tuple[Message, str] | tuple[None, None]:
     """The newest pending customer message carrying a handoff ref (upper-cased)."""
     for message in reversed(pending):
