@@ -71,6 +71,8 @@ jobs:
             MYBILL_AUDIENCE=https://mybill-service-276371417285.us-central1.run.app
             MYBILL_AUTH=google
             ADMIN_ALLOWED_EMAILS=srisafabricshyd@gmail.com
+            IG_ACCOUNT_ID=17841463885925115
+            ALLOWED_IG_SENDERS=1634552674698294
           secrets: |
             WA_ACCESS_TOKEN=WA_ACCESS_TOKEN:latest
             WA_APP_SECRET=WA_APP_SECRET:latest

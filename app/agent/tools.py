@@ -314,7 +314,7 @@ async def start_order(ctx: ToolContext, args: dict[str, Any]) -> dict[str, Any]:
     if ctx.mybill is None:
         return _unavailable()
     try:
-        customer = await ctx.mybill.upsert_customer(orders.phone_e164(ctx.conversation), ctx.conversation.customer_name)
+        customer = await ctx.mybill.upsert_customer(**orders.customer_identity(ctx.conversation))
         saved = await ctx.mybill.get_latest_measurements(customer["customer_id"])
     except (MybillUnavailable, MybillRejected):
         return _unavailable()
@@ -536,10 +536,16 @@ async def save_delivery_details(ctx: ToolContext, args: dict[str, Any]) -> dict[
     pincode = str(args.get("pincode") or "").strip()
     if not re.fullmatch(r"[1-9][0-9]{5}", pincode):
         missing.append("pincode (6 digits, not starting with 0)")
-    phone = str(args.get("phone") or "").strip() or orders.phone_e164(ctx.conversation)
-    digits = "".join(ch for ch in phone if ch.isdigit())
-    if not 10 <= len(digits) <= 13:
-        missing.append("phone (10-13 digits)")
+    if ctx.conversation.channel == "instagram":
+        # No phone on Instagram: the courier needs a 10-digit Indian mobile.
+        phone = orders.indian_mobile_e164(str(args.get("phone") or "")) or ""
+        if not phone:
+            missing.append("phone (10-digit Indian mobile for the courier)")
+    else:
+        phone = str(args.get("phone") or "").strip() or orders.phone_e164(ctx.conversation)
+        digits = "".join(ch for ch in phone if ch.isdigit())
+        if not 10 <= len(digits) <= 13:
+            missing.append("phone (10-13 digits)")
     if missing:
         return {"error": "invalid_input", "missing_or_invalid": missing}
     for col, value in values.items():

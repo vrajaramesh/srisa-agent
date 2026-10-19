@@ -99,9 +99,15 @@ class MybillClient:
         """[{size_code, bust_in, waist_in, hip_in, shoulder_in, length_in}]."""
         return await self._get("/api/agent/size-chart")
 
-    async def upsert_customer(self, phone_e164: str, name: str | None) -> dict[str, Any]:
-        """Find-or-create the mybill customer for this WhatsApp number -> {customer_id, ...}."""
-        body: dict[str, Any] = {"phone_e164": phone_e164}
+    async def upsert_customer(self, phone_e164: str | None = None, name: str | None = None,
+                              instagram_user_id: str | None = None) -> dict[str, Any]:
+        """Find-or-create the mybill customer by WhatsApp number and/or Instagram id -> {customer_id, ...}.
+        Both together let mybill merge two customers that turn out to be one person."""
+        body: dict[str, Any] = {}
+        if phone_e164:
+            body["phone_e164"] = phone_e164
+        if instagram_user_id:
+            body["instagram_user_id"] = instagram_user_id
         if name:
             body["name"] = name[:100]
         return await self._request("POST", "/api/agent/customers/upsert", json=body)

@@ -64,6 +64,13 @@ class Settings(DatabaseSettings, AgentSettings):
     # (Instagram > API setup), which can differ from WA_APP_SECRET; either is accepted.
     ig_app_secret: SecretStr | None = None
     ig_verify_token: SecretStr | None = None  # defaults to WA_VERIFY_TOKEN
+    ig_account_id: str = ""  # Instagram professional account id (srisa_fabrics: 17841463885925115)
+    # Local/tests only. In Cloud Run the token is read from Secret Manager (IG_ACCESS_TOKEN) with a 1-hour cache.
+    ig_access_token: SecretStr | None = None
+    # Comma-separated Instagram-scoped user ids. When set, the bot replies ONLY to these accounts on Instagram.
+    allowed_ig_senders: str = ""
+    # Keep a raw copy of every Instagram webhook in agent.raw_webhooks (for collecting payload samples).
+    ig_capture_raw: bool = True
     log_level: str = "INFO"
     # Comma-separated WhatsApp ids (e.g. "919876543210,919812345678"). When set, the bot
     # replies ONLY to these numbers and just logs everyone else - for safe testing on the
@@ -87,6 +94,10 @@ class Settings(DatabaseSettings, AgentSettings):
 
     admin_api_key: SecretStr | None = None
     admin_allowed_emails: str = ""
+
+    @property
+    def allowed_ig_sender_set(self) -> frozenset[str]:
+        return frozenset(n.strip() for n in self.allowed_ig_senders.split(",") if n.strip())
 
     @property
     def ig_webhook_secrets(self) -> list[str]:

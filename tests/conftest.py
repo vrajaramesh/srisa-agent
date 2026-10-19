@@ -48,6 +48,9 @@ os.environ.update(
         "ADMIN_API_KEY": "test-admin-key",
         "ADMIN_ALLOWED_EMAILS": "",
         "TASKS_TARGET_URL": "",
+        "IG_ACCOUNT_ID": "17841400000000000",
+        "IG_ACCESS_TOKEN": "test-ig-token",
+        "ALLOWED_IG_SENDERS": "",
     }
 )
 
@@ -70,7 +73,8 @@ ROOT = Path(__file__).parent.parent
 APP_SECRET = "test-app-secret"
 VERIFY_TOKEN = "test-verify-token"
 MESSAGES_URL = "https://graph.facebook.com/v25.0/106540352242922/messages"
-TABLES = ("raw_webhooks", "conversation_entries", "processed_events", "order_drafts", "llm_turns", "messages", "conversations", "product_links", "ref_codes")
+IG_MESSAGES_URL = "https://graph.instagram.com/v25.0/17841400000000000/messages"
+TABLES = ("instagram_echoes", "raw_webhooks", "conversation_entries", "processed_events", "order_drafts", "llm_turns", "messages", "conversations", "product_links", "ref_codes")
 MYBILL = "https://mybill.test/api/agent"
 
 assert TEST_SCHEMA.endswith("_test")  # guard: we TRUNCATE and DROP this schema

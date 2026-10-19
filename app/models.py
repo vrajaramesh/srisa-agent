@@ -70,6 +70,11 @@ class Conversation(Base):
     entry_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     # Free entry point window (ad entries only): our first reply + 72h. See app/agent/fep.py.
     fep_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # Instagram: @username from the User Profile API (fetched once; profile_fetched_at marks the attempt).
+    profile_username: Mapped[str | None] = mapped_column(Text)
+    profile_fetched_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # Last choices offered ([{n, id, title}]): a typed "2" is mapped back to that choice's id.
+    last_offered_choices: Mapped[list[dict[str, Any]] | None] = mapped_column(JSONB)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
@@ -120,6 +125,8 @@ class Message(Base):
     external_message_id: Mapped[str | None] = mapped_column(Text, unique=True)
     # id of a tapped reply button / list row (e.g. "size:M", "confirm:<draft>:<version>"); its title is in text
     reply_id: Mapped[str | None] = mapped_column(Text)
+    # Outbound only: bot (sent by us) | staff (typed by the team in the Instagram app, seen as an echo)
+    author: Mapped[str | None] = mapped_column(Text)
     type: Mapped[str] = mapped_column(Text)
     text: Mapped[str | None] = mapped_column(Text)
     raw: Mapped[dict[str, Any] | None] = mapped_column(JSONB)
@@ -244,3 +251,20 @@ class RawWebhook(Base):
     channel: Mapped[str] = mapped_column(Text)
     payload: Mapped[dict[str, Any]] = mapped_column(JSONB)
     received_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class InstagramEcho(Base):
+    """A message the business account sent on Instagram. Decided after a short delay (under the conversation
+    lock): our own send (its mid is a recorded outbound message) or staff typing in the Instagram app."""
+
+    __tablename__ = "instagram_echoes"
+
+    mid: Mapped[str] = mapped_column(Text, primary_key=True)
+    conversation_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("conversations.id", ondelete="CASCADE")
+    )
+    text: Mapped[str | None] = mapped_column(Text)
+    raw: Mapped[dict[str, Any] | None] = mapped_column(JSONB)
+    received_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    decided_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    decision: Mapped[str | None] = mapped_column(Text)

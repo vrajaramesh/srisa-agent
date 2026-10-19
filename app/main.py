@@ -4,6 +4,7 @@ import json
 import logging
 import uuid
 from collections.abc import AsyncIterator
+from datetime import datetime, timezone
 from contextlib import asynccontextmanager
 
 from fastapi import BackgroundTasks, FastAPI, Query, Request, Response
@@ -13,6 +14,7 @@ from pydantic import BaseModel
 from sqlalchemy.exc import SQLAlchemyError
 
 from app import events, mybill_client, queue, worker, whatsapp_client
+from app.channels import instagram
 from app import repositories as repo
 from app.config import get_settings
 from app.db import dispose_db, get_sessionmaker, init_db
@@ -24,6 +26,7 @@ from app.webhook_parser import IncomingMessage, ParsedWebhook, parse_webhook
 logger = logging.getLogger("srisa_agent")
 
 CHANNEL = "whatsapp"
+IG_CHANNEL = "instagram"
 
 # At import time, so uvicorn's own startup lines are already JSON.
 setup_logging(get_settings().log_level)
@@ -44,6 +47,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     finally:
         await mybill_client.close_client()
         await whatsapp_client.close_client()
+        await instagram.close_client()
         await dispose_db()
 
 
@@ -118,9 +122,13 @@ async def verify_instagram_webhook(
     return Response(status_code=403)
 
 
+ECHO_DELAY_SECONDS = 5
+
+
 @app.post("/webhook/instagram")
-async def receive_instagram_webhook(request: Request) -> Response:
-    """Phase 9 step 0: verify the signature and store the raw payload (no parsing, no replies yet)."""
+async def receive_instagram_webhook(request: Request, background: BackgroundTasks) -> Response:
+    """Instagram DMs: verify -> store (raw copy + parsed messages/echoes) -> enqueue -> 200.
+    Echoes are processed ~5 s later, so our own sends are recorded before they're judged."""
     raw_body = await request.body()
     signature = request.headers.get("X-Hub-Signature-256")
     secrets = get_settings().ig_webhook_secrets
@@ -135,17 +143,57 @@ async def receive_instagram_webhook(request: Request) -> Response:
         logger.warning("Rejected Instagram webhook: body is not valid JSON")
         return Response(status_code=400)
     try:
-        async with get_sessionmaker()() as session, session.begin():
-            session.add(RawWebhook(channel="instagram", payload=payload))
+        conversation_ids, echo_conversation_ids = await store_instagram_webhook(payload)
     except (SQLAlchemyError, OSError):
         logger.exception("Failed to store Instagram webhook")
         return Response(status_code=500)
+    await queue.enqueue(conversation_ids, background)
+    await queue.enqueue(echo_conversation_ids, background, delay_seconds=ECHO_DELAY_SECONDS)
     entries = payload.get("entry") or [] if isinstance(payload, dict) else []
     logger.info("Instagram webhook stored", extra={"fields": {
         "object": payload.get("object") if isinstance(payload, dict) else None,
         "entries": len(entries),
         "kinds": sorted({k for e in entries if isinstance(e, dict) for k in e if k not in ("id", "time")})}})
     return Response(status_code=200)
+
+
+async def store_instagram_webhook(payload: dict) -> tuple[list[uuid.UUID], list[uuid.UUID]]:
+    """Save the raw body, customer messages and echoes in one transaction.
+    Returns (conversations with new customer messages, conversations with new echoes)."""
+    allowed = get_settings().allowed_ig_sender_set
+    to_process: list[uuid.UUID] = []
+    echoes: list[uuid.UUID] = []
+    async with get_sessionmaker()() as session, session.begin():
+        if get_settings().ig_capture_raw:
+            session.add(RawWebhook(channel=IG_CHANNEL, payload=payload))
+        for msg in instagram.parse_webhook(payload):
+            if msg.is_echo:
+                conversation_id = await repo.upsert_conversation_for(session, IG_CHANNEL, msg.external_user_id, None, None)
+                if await repo.record_instagram_echo(session, conversation_id, msg.external_message_id, msg.text, msg.raw):
+                    if conversation_id not in echoes:
+                        echoes.append(conversation_id)
+                continue
+            conversation_id = await repo.upsert_conversation_for(
+                session, IG_CHANNEL, msg.external_user_id, None, _instagram_time(msg.timestamp))
+            is_allowed = not allowed or msg.external_user_id in allowed
+            stored = await repo.insert_inbound(session, conversation_id, msg.external_message_id, msg.type, msg.text,
+                                               msg.tapped_id, msg.raw, RECEIVED if is_allowed else SKIPPED)
+            if stored is None:
+                logger.info("Duplicate Instagram message ignored", extra={"fields": {"message_id": msg.external_message_id}})
+                continue
+            logger.info("Incoming Instagram message", extra={"fields": {
+                "message_id": msg.external_message_id, "from": msg.external_user_id, "type": msg.type, "text": msg.text,
+                "allowed": is_allowed}})
+            if is_allowed and conversation_id not in to_process:
+                to_process.append(conversation_id)
+    return to_process, echoes
+
+
+def _instagram_time(seconds: str | None) -> datetime:
+    try:
+        return datetime.fromtimestamp(int(seconds or ""), tz=timezone.utc)
+    except (ValueError, OverflowError):
+        return datetime.now(timezone.utc)
 
 
 async def store_webhook(parsed: ParsedWebhook) -> list[uuid.UUID]:

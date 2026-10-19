@@ -8,19 +8,22 @@ import asyncio
 import logging
 import uuid
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app import mybill_client, whatsapp_client
+from app import channels, mybill_client
 from app import repositories as repo
 from app.agent import ad_entry, fep, orders, resolution, tools
-from app.agent.formatting import split_message
 from app.agent.runner import AgentResult, run_agent
+from app.channels import instagram
+from app.channels.base import ChannelAdapter, SendResult
 from app.config import AgentSettings, get_settings
 from app.db import get_sessionmaker
 from app.models import DRAFT_OPEN, FAILED, PROCESSED, SKIPPED, Conversation, Message, OrderDraft
+
+INSTAGRAM_REPLY_WINDOW_HOURS = 24
 
 logger = logging.getLogger(__name__)
 
@@ -42,39 +45,63 @@ class ProcessResult:
 
 
 class WorkerMessenger:
-    """orders.Messenger over WhatsApp; every successful send is recorded as an outbound message in this
-    transaction. The recipient is always the conversation's customer."""
+    """orders.Messenger over the conversation's channel (ChannelAdapter); every successful send is recorded as an
+    outbound message in this transaction. The recipient is always the conversation's customer."""
 
-    def __init__(self, session: AsyncSession, conversation: Conversation) -> None:
+    def __init__(self, session: AsyncSession, conversation: Conversation, adapter: ChannelAdapter | None = None) -> None:
         self._session, self._conversation = session, conversation
+        self.adapter = adapter or channels.adapter_for(conversation.channel)
         self.error: str | None = None
         self.sent = 0  # messages successfully sent in this run
 
-    def _record(self, sent: whatsapp_client.SendResult, text: str, message_type: str, meta: dict | None) -> bool:
+    @property
+    def _to(self) -> str:
+        return self._conversation.external_user_id
+
+    def _record(self, sent: SendResult, text: str, message_type: str, meta: dict | None) -> bool:
         if not sent.ok:
             self.error = sent.error or "send failed"
             return False
         repo.add_outbound_message(self._session, self._conversation.id, text, sent.message_id,
-                                  {**(sent.data or {}), **(meta or {})}, message_type=message_type)
+                                  {**(sent.data or {}), **(meta or {})}, message_type=message_type, author="bot")
         self.sent += 1
         return True
 
     async def send_text(self, text: str) -> bool:
-        sent = await whatsapp_client.send_text(self._conversation.external_user_id, text)
-        return self._record(sent, text, "text", None)
+        """Split for the channel (WhatsApp: 1000 characters, Instagram: 1000 bytes); every part is recorded."""
+        for part in self.adapter.split_text(text):
+            if not self._record(await self.adapter.send_text(self._to, part), part, "text", None):
+                return False
+        return True
 
     async def send_image(self, url: str, caption: str | None) -> bool:
-        sent = await whatsapp_client.send_image(self._conversation.external_user_id, url, caption)
-        return self._record(sent, f"[photo] {caption or url}", "image", None)
+        if self.adapter.image_captions:
+            return self._record(await self.adapter.send_image(self._to, url, caption), f"[photo] {caption or url}",
+                                "image", None)
+        # Instagram: no captions on images - the caption follows as its own (recorded) text message.
+        if not self._record(await self.adapter.send_image(self._to, url, None), f"[photo] {url}", "image", None):
+            return False
+        return await self.send_text(caption) if caption else True
+
+    async def _send_choices(self, body: str, choices: list[dict[str, str]], style: str, button_text: str,
+                            section_title: str | None, meta: dict | None) -> bool:
+        sent = await self.adapter.send_choices(self._to, body, choices, style, button_text, section_title)
+        if sent.ok and sent.data.get("offered"):
+            self._conversation.last_offered_choices = sent.data["offered"]
+        return self._record(sent, body, "interactive", meta)
 
     async def send_buttons(self, body: str, buttons: list[dict[str, str]], meta: dict | None = None) -> bool:
-        sent = await whatsapp_client.send_buttons(self._conversation.external_user_id, body, buttons)
-        return self._record(sent, body, "interactive", {**(meta or {}), "buttons": buttons})
+        return await self._send_choices(body, buttons, "buttons", "Choose", None, {**(meta or {}), "buttons": buttons})
 
     async def send_list(self, body: str, button_text: str, sections: list[dict[str, Any]],
                         meta: dict | None = None) -> bool:
-        sent = await whatsapp_client.send_list(self._conversation.external_user_id, body, button_text, sections)
-        return self._record(sent, body, "interactive", meta)
+        rows = [row for section in sections for row in section.get("rows", [])]
+        title = sections[0].get("title") if sections else None
+        return await self._send_choices(body, rows, "list", button_text, title, meta)
+
+    async def send_link_button(self, body: str, button_text: str, url: str) -> bool:
+        return self._record(await self.adapter.send_link_button(self._to, body, button_text, url),
+                            f"{body}\n{url}", "interactive", {"link": url})
 
 
 class WorkerStore:
@@ -154,6 +181,8 @@ async def _process(conversation_id: uuid.UUID, background: list[asyncio.Task]) -
         if conversation is None:
             logger.warning("Unknown conversation", extra={"fields": {"conversation_id": str(conversation_id)}})
             return result
+        if conversation.channel == "instagram":
+            await _decide_echoes(session, conversation)
         pending = await repo.pending_inbound(session, conversation_id, MAX_ATTEMPTS)
         if not pending:
             return result
@@ -166,11 +195,22 @@ async def _process(conversation_id: uuid.UUID, background: list[asyncio.Task]) -
                         extra={"fields": {"conversation_id": str(conversation_id), "messages": len(pending)}})
             return result
 
-        for message in pending:
-            if message.external_message_id:
-                await whatsapp_client.mark_as_read(message.external_message_id)
-
         messenger = WorkerMessenger(session, conversation)
+        if conversation.channel == "instagram":
+            if _outside_instagram_window(conversation):
+                for message in pending:
+                    message.status, message.last_error = SKIPPED, "outside_24h"
+                logger.info("Instagram reply window closed; not replying",
+                            extra={"fields": {"conversation_id": str(conversation_id)}})
+                return result
+            await messenger.adapter.mark_seen(conversation.external_user_id, None)
+            await _fetch_instagram_profile(conversation)
+        else:
+            for message in pending:
+                if message.external_message_id:
+                    await messenger.adapter.mark_seen(conversation.external_user_id, message.external_message_id)
+        map_numbered_replies(conversation, pending)
+
         mybill = mybill_client.get_client()
         ctx = tools.ToolContext(conversation=conversation, mybill=mybill, messenger=messenger,
                                 store=WorkerStore(session), draft=await repo.open_draft(session, conversation_id))
@@ -282,12 +322,60 @@ async def _agent_path(session: AsyncSession, ctx: tools.ToolContext, pending: li
     replies = [FALLBACK_REPLY] if agent.fallback else agent.replies
 
     for reply in replies:
-        for chunk in split_message(reply):
-            if not await ctx.messenger.send_text(chunk):
-                # The customer got nothing (or only part): don't hand over yet, or the retry would stay silent.
-                conversation.needs_human, conversation.needs_human_reason = False, None
-                return ctx.messenger.error or "send failed"
+        if not await ctx.messenger.send_text(reply):
+            # The customer got nothing (or only part): don't hand over yet, or the retry would stay silent.
+            conversation.needs_human, conversation.needs_human_reason = False, None
+            return ctx.messenger.error or "send failed"
     if agent.fallback:
         conversation.needs_human = True
         conversation.needs_human_reason = f"llm_failure: {agent.error}"
     return None
+
+
+# ── Instagram ────────────────────────────────────────────────────────────────
+
+def _outside_instagram_window(conversation: Conversation, now: datetime | None = None) -> bool:
+    """Instagram allows replies only within 24 h of the customer's last message (no templates)."""
+    last = conversation.last_customer_message_at
+    return last is None or (now or datetime.now(timezone.utc)) - last > timedelta(hours=INSTAGRAM_REPLY_WINDOW_HOURS)
+
+
+async def _fetch_instagram_profile(conversation: Conversation) -> None:
+    """Name/username once per conversation (failures are ignored and not retried)."""
+    if conversation.profile_fetched_at is not None:
+        return
+    conversation.profile_fetched_at = datetime.now(timezone.utc)
+    profile = await instagram.fetch_profile(conversation.external_user_id)
+    if profile:
+        conversation.profile_username = profile.get("username")
+        if not conversation.customer_name:
+            conversation.customer_name = profile.get("name") or profile.get("username")
+
+
+async def _decide_echoes(session: AsyncSession, conversation: Conversation) -> None:
+    """Echoes of our own sends are ignored; anything else was typed by staff in the Instagram app -> they take over.
+    Runs under the conversation lock, so every send of an earlier run is already recorded."""
+    for echo in await repo.pending_echoes(session, conversation.id):
+        echo.decided_at = datetime.now(timezone.utc)
+        if await repo.is_our_outbound(session, echo.mid):
+            echo.decision = "ours"
+            continue
+        echo.decision = "staff"
+        repo.add_outbound_message(session, conversation.id, echo.text or "[staff message]", echo.mid, echo.raw or {},
+                                  message_type="text", author="staff")
+        if not conversation.needs_human:
+            conversation.needs_human, conversation.needs_human_reason = True, "staff_took_over"
+        logger.info("STAFF_TOOK_OVER", extra={"fields": {"conversation_id": str(conversation.id), "mid": echo.mid}})
+
+
+def map_numbered_replies(conversation: Conversation, pending: list[Message]) -> None:
+    """A typed "2" after we offered choices becomes a tap on choice 2 (reply_id = its id). Any other message
+    clears the offer, so a later number (e.g. a quantity) is not mistaken for a choice."""
+    for message in pending:
+        offered = conversation.last_offered_choices or []
+        text = (message.text or "").strip()
+        if message.reply_id is None and message.type == "text" and offered and text.isdigit():
+            choice = next((c for c in offered if str(c.get("n")) == text), None)
+            if choice:
+                message.reply_id, message.type, message.text = choice["id"], "interactive", choice["title"]
+        conversation.last_offered_choices = None

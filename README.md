@@ -126,6 +126,28 @@ python scripts/send_fake_referral.py --url http://localhost:8000/webhook/whatsap
 
 Map the ad id to a design first in mybill-ui → **Ad & post links**, or put a design code in `--body`.
 
+### Instagram DMs (Phase 9)
+
+Instagram uses the same agent, flow, tools and safety rules as WhatsApp. Everything channel-specific is in `app/channels/`:
+- `base.py`: `NormalizedInbound` and the `ChannelAdapter` interface.
+- `whatsapp.py`: wraps `whatsapp_client`; payloads unchanged.
+- `instagram.py`: parser plus `graph.instagram.com` sending.
+
+The worker's `WorkerMessenger` picks the adapter from `conversation.channel`.
+
+- **Webhook:** `POST /webhook/instagram` checks the signature (`IG_APP_SECRET`, else `WA_APP_SECRET`). It keeps a raw copy (`IG_CAPTURE_RAW`), stores messages, and queues echoes with a 5 s delay.
+- **Echoes:** an echo whose mid matches a recorded outbound message is ours. Anything else is staff typing in the Instagram app: it's stored as `author='staff'`, `needs_human` is set, and `STAFF_TOOK_OVER` is logged.
+- **Sending:**
+  - Text is split at 1000 UTF-8 bytes.
+  - Images go without a caption; the caption follows as its own text.
+  - Choices are quick replies. If Meta rejects them, numbered text is used instead ("Reply 1, 2 or 3", remembered for 1 h), and a typed number is mapped back via `conversations.last_offered_choices`.
+- **Limits:**
+  - No reply more than 24 h after the customer's last message.
+  - Only `ALLOWED_IG_SENDERS` (Instagram-scoped user ids) get replies while it's set.
+- **Customers:** name and username are fetched once from the User Profile API. The mybill customer is upserted by `instagram_user_id`, and the address step requires a 10-digit Indian mobile.
+- **Token:** `IG_ACCESS_TOKEN` is read from Secret Manager at runtime and cached for 1 h. Locally, use the `IG_ACCESS_TOKEN` env var.
+- **Config:** `IG_ACCOUNT_ID` (srisa_fabrics: 17841463885925115).
+
 ### Tuning the prompt in your terminal
 
 ```bash

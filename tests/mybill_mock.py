@@ -47,6 +47,7 @@ class MybillMock:
         self.resolve_calls: list[tuple[str, str]] = []
         self.events: list[dict[str, Any]] = []
         self.resolve_unavailable = False
+        self.upserts: list[dict[str, Any]] = []
         router.get(f"{BASE}/designs/KUR-101").mock(side_effect=lambda r: self._down() or Response(200, json=KUR_101))
         router.get(url__regex=rf"{BASE}/designs/(?!KUR-101|latest).*").mock(return_value=Response(404, json={}))
         router.get(f"{BASE}/size-chart").mock(side_effect=lambda r: self._down() or Response(200, json=SIZE_CHART))
@@ -79,7 +80,9 @@ class MybillMock:
 
     def _upsert(self, request: Request) -> Response:
         body = json.loads(request.content)
-        return self._down() or Response(200, json={"customer_id": 512, "phone_e164": body["phone_e164"], "created": False})
+        self.upserts.append(body)
+        return self._down() or Response(200, json={"customer_id": 512, "phone_e164": body.get("phone_e164"),
+                                                   "instagram_user_id": body.get("instagram_user_id"), "created": False})
 
     def _get_measurements(self, request: Request) -> Response:
         if self.saved_measurements is None:

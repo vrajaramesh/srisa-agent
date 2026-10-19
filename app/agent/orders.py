@@ -48,6 +48,24 @@ def phone_e164(conversation: Conversation) -> str:
     return "+" + conversation.external_user_id.lstrip("+")
 
 
+def indian_mobile_e164(value: str | None) -> str | None:
+    """A 10-digit Indian mobile (optionally +91 / 91 / 0 prefixed) as +91XXXXXXXXXX, else None."""
+    digits = "".join(ch for ch in (value or "") if ch.isdigit())
+    if len(digits) == 12 and digits.startswith("91"):
+        digits = digits[2:]
+    elif len(digits) == 11 and digits.startswith("0"):
+        digits = digits[1:]
+    return f"+91{digits}" if len(digits) == 10 and digits[0] in "6789" else None
+
+
+def customer_identity(conversation: Conversation, name: str | None = None) -> dict[str, Any]:
+    """upsert_customer arguments for this conversation's channel."""
+    name = name if name is not None else conversation.customer_name
+    if conversation.channel == "instagram":
+        return {"instagram_user_id": conversation.external_user_id, "name": name}
+    return {"phone_e164": phone_e164(conversation), "name": name}
+
+
 def option_maps(design: dict[str, Any]) -> tuple[set[str], dict[int, str], dict[int, dict[str, Any]]]:
     """(groups, option_id -> group, option_id -> option) for a mybill design (active options only)."""
     groups: set[str] = set()
@@ -91,7 +109,7 @@ def order_attribution(conversation: Conversation | None) -> dict[str, Any]:
     return out
 
 
-def order_request(draft: OrderDraft, customer_id: int, channel: str = "WHATSAPP",
+def order_request(draft: OrderDraft, customer_id: int, channel: str | None = None,
                   conversation: Conversation | None = None) -> dict[str, Any]:
     """POST /api/agent/orders body. The idempotency key ties the order to this exact draft version."""
     return {
@@ -102,7 +120,7 @@ def order_request(draft: OrderDraft, customer_id: int, channel: str = "WHATSAPP"
         "delivery": {"name": draft.delivery_name, "phone": draft.delivery_phone, "address_line1": draft.address_line1,
                      "address_line2": draft.address_line2, "city": draft.city, "state": draft.state,
                      "pincode": draft.pincode},
-        "channel": channel,
+        "channel": channel or (conversation.channel.upper() if conversation is not None else "WHATSAPP"),
         "idempotency_key": f"{draft.id}:{draft.version}",
     }
 
@@ -261,7 +279,7 @@ async def confirm(conversation: Conversation, draft: OrderDraft | None, confirme
     customer_id = draft.mybill_customer_id or conversation.mybill_customer_id
     try:
         if customer_id is None:
-            customer_id = (await mybill.upsert_customer(phone_e164(conversation), conversation.customer_name))["customer_id"]
+            customer_id = (await mybill.upsert_customer(**customer_identity(conversation)))["customer_id"]
             conversation.mybill_customer_id = draft.mybill_customer_id = customer_id
         order = await mybill.create_order(order_request(draft, customer_id, conversation=conversation))
     except MybillUnavailable as exc:

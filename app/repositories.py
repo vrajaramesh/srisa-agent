@@ -19,6 +19,7 @@ from app.models import (
     SKIPPED,
     Conversation,
     ConversationEntry,
+    InstagramEcho,
     LlmTurn,
     Message,
     OrderDraft,
@@ -44,12 +45,18 @@ def _message_time(msg: IncomingMessage) -> datetime:
 
 async def upsert_conversation(session: AsyncSession, channel: str, msg: IncomingMessage) -> uuid.UUID:
     """Create the conversation for this sender, or refresh its name / last message time."""
+    return await upsert_conversation_for(session, channel, msg.from_, msg.profile_name, _message_time(msg))
+
+
+async def upsert_conversation_for(session: AsyncSession, channel: str, external_user_id: str, name: str | None,
+                                  customer_message_at: datetime | None) -> uuid.UUID:
+    """Channel-neutral upsert. customer_message_at=None (e.g. an Instagram echo) leaves the last message time."""
     stmt = pg_insert(Conversation).values(
         id=uuid.uuid4(),
         channel=channel,
-        external_user_id=msg.from_,
-        customer_name=msg.profile_name,
-        last_customer_message_at=_message_time(msg),
+        external_user_id=external_user_id,
+        customer_name=name,
+        last_customer_message_at=customer_message_at,
     )
     stmt = stmt.on_conflict_do_update(
         constraint="uq_conversations_channel_user",
@@ -68,23 +75,50 @@ async def insert_inbound_message(
     session: AsyncSession, conversation_id: uuid.UUID, msg: IncomingMessage, status: str = RECEIVED
 ) -> uuid.UUID | None:
     """Store an inbound message. Returns None if this Meta message id was already stored."""
+    return await insert_inbound(session, conversation_id, msg.id, msg.type, msg.text, msg.reply_id, msg.raw, status)
+
+
+async def insert_inbound(session: AsyncSession, conversation_id: uuid.UUID, external_message_id: str, message_type: str,
+                         text: str | None, reply_id: str | None, raw: dict | None, status: str = RECEIVED) -> uuid.UUID | None:
+    """Channel-neutral insert; None if this message id was already stored (duplicate webhook)."""
     stmt = (
         pg_insert(Message)
         .values(
             id=uuid.uuid4(),
             conversation_id=conversation_id,
             direction=INBOUND,
-            external_message_id=msg.id,
-            type=msg.type,
-            text=msg.text,
-            reply_id=msg.reply_id,
-            raw=msg.raw or None,
+            external_message_id=external_message_id,
+            type=message_type,
+            text=text,
+            reply_id=reply_id,
+            raw=raw or None,
             status=status,
         )
         .on_conflict_do_nothing(index_elements=["external_message_id"])
         .returning(Message.id)
     )
     return (await session.execute(stmt)).scalar_one_or_none()
+
+
+async def record_instagram_echo(session: AsyncSession, conversation_id: uuid.UUID, mid: str, text: str | None,
+                                raw: dict | None) -> bool:
+    """Store an echo for a delayed decision; False if already stored."""
+    stmt = (pg_insert(InstagramEcho).values(mid=mid, conversation_id=conversation_id, text=text, raw=raw)
+            .on_conflict_do_nothing(index_elements=["mid"]).returning(InstagramEcho.mid))
+    return (await session.execute(stmt)).scalar_one_or_none() is not None
+
+
+async def pending_echoes(session: AsyncSession, conversation_id: uuid.UUID) -> list[InstagramEcho]:
+    stmt = (select(InstagramEcho)
+            .where(InstagramEcho.conversation_id == conversation_id, InstagramEcho.decided_at.is_(None))
+            .order_by(InstagramEcho.received_at))
+    return list((await session.execute(stmt)).scalars().all())
+
+
+async def is_our_outbound(session: AsyncSession, external_message_id: str) -> bool:
+    """True if we recorded an outbound message with this id (i.e. the echo is of our own send)."""
+    stmt = select(Message.id).where(Message.external_message_id == external_message_id, Message.direction == OUTBOUND)
+    return (await session.execute(stmt)).first() is not None
 
 
 async def apply_status(session: AsyncSession, status: StatusUpdate) -> bool:
@@ -189,13 +223,14 @@ def add_llm_turn(session: AsyncSession, conversation_id: uuid.UUID, result: Any)
 
 def add_outbound_message(
     session: AsyncSession, conversation_id: uuid.UUID, body: str, external_message_id: str | None, raw: dict,
-    message_type: str = "text",
+    message_type: str = "text", author: str | None = None,
 ) -> Message:
     """Record a message we sent (a text reply, or an image with its caption/URL as text)."""
     message = Message(
         conversation_id=conversation_id,
         direction=OUTBOUND,
         external_message_id=external_message_id,
+        author=author,
         type=message_type,
         text=body,
         raw=raw or None,

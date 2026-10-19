@@ -19,6 +19,7 @@ PLACEHOLDERS = {
     "document": "[customer sent a document]",
     "sticker": "[customer sent a sticker]",
     "location": "[customer shared a location]",
+    "share": "[customer shared an Instagram post]",
     "contacts": "[customer shared a contact]",
     "reaction": "[customer reacted to a message]",
 }
@@ -40,9 +41,13 @@ def facts_block(conversation: Conversation, order: dict[str, Any] | None = None,
     `order` is tools.progress(): stage, filled draft fields, missing fields, summary awaiting confirmation."""
     today = (now or datetime.now(IST)).astimezone(IST)
     order = order or {}
+    channel = conversation.channel or "whatsapp"
     lines = [
         "Conversation facts (from our system, not from the customer):",
-        f"- Customer name (WhatsApp profile): {conversation.customer_name or 'unknown'}",
+        f"- Channel: {channel}",
+        f"- Customer name ({'Instagram' if channel == 'instagram' else 'WhatsApp'} profile): "
+        f"{conversation.customer_name or 'unknown'}"
+        + (f" (@{conversation.profile_username})" if conversation.profile_username else ""),
         f"- Design she is currently looking at: {conversation.current_product_code or 'none yet'}",
         f"- Order stage: {order.get('stage') or conversation.stage or 'browsing'}",
     ]
@@ -58,7 +63,8 @@ def facts_block(conversation: Conversation, order: dict[str, Any] | None = None,
                  + ("yes - wait for her to tap Confirm or Change" if order.get("summary_awaiting_confirmation") else "no"))
     lines += [
         f"- Today: {today:%A, %d %B %Y} (Asia/Kolkata)",
-        "- She messaged within the last 24 hours, so every reply is normal free-form WhatsApp text.",
+        "- She messaged within the last 24 hours, so every reply is normal free-form "
+        + ("Instagram DM text." if channel == "instagram" else "WhatsApp text."),
     ]
     return "\n".join(lines)
 
