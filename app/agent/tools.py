@@ -276,7 +276,9 @@ async def list_latest_designs(ctx: ToolContext, args: dict[str, Any]) -> dict[st
 
 async def get_size_chart(ctx: ToolContext, args: dict[str, Any]) -> dict[str, Any]:
     try:
-        return {"unit": "inches (body measurements)", "sizes": await ctx.chart()}
+        return {"unit": "inches (body measurements)", "sizes": await ctx.chart(),
+                "custom_size": "If none fits, she can choose a custom size (size_code CUSTOM): our tailor calls her "
+                               "after payment to take her exact measurements."}
     except MybillUnavailable:
         return _unavailable()
 
@@ -359,9 +361,11 @@ async def send_size_options(ctx: ToolContext, args: dict[str, Any]) -> dict[str,
     rows = [{"id": f"size:{s['size_code']}", "title": s["size_code"],
              "description": f"Bust {s['bust_in']:g} · Waist {s['waist_in']:g} · Hip {s['hip_in']:g} in"}
             for s in chart]
+    rows.append({"id": f"size:{flow.CUSTOM_SIZE}", "title": "Custom size",
+                 "description": "Our tailor calls you after payment to take your measurements"})
     ok = await ctx.messenger.send_list("Please choose your size 👇 (body measurements in inches)", "Choose size",
                                        [{"title": "Sizes", "rows": rows}])
-    return {"sent": ok, "sizes": [s["size_code"] for s in chart]} if ok else {"error": "send_failed"}
+    return {"sent": ok, "sizes": [s["size_code"] for s in chart] + [flow.CUSTOM_SIZE]} if ok else {"error": "send_failed"}
 
 
 async def send_fit_options(ctx: ToolContext, args: dict[str, Any]) -> dict[str, Any]:
@@ -378,8 +382,10 @@ async def save_size(ctx: ToolContext, args: dict[str, Any]) -> dict[str, Any]:
     updates: dict[str, Any] = {}
     if args.get("size_code") not in (None, ""):
         code = str(args["size_code"]).strip().upper()
+        if code in ("CUSTOM SIZE", "CUSTOM_SIZE"):
+            code = flow.CUSTOM_SIZE
         try:
-            valid = [s["size_code"] for s in await ctx.chart()]
+            valid = [s["size_code"] for s in await ctx.chart()] + [flow.CUSTOM_SIZE]
         except MybillUnavailable:
             return _unavailable()
         if code not in valid:
@@ -690,7 +696,8 @@ TOOLS: list[Tool] = [
          {"type": "object", "properties": {}}, send_fit_options, frozenset({SIZING})),
     Tool("save_size",
          "Save her size from our chart, her height in cm, and/or fit preference (SNUG, REGULAR or RELAXED). Any of "
-         "them can be given alone. Once size, height and fit are all known, the order moves on to options.",
+         "them can be given alone. Once size, height and fit are all known, the order moves on to options. "
+         "size_code CUSTOM = custom size: our tailor calls her after payment for exact measurements (no height/fit needed).",
          {"type": "object", "properties": {"size_code": {"type": "string", "description": "e.g. M"},
           "height_cm": {**_NUM, "description": "120-200"},
           "fit_preference": {"type": "string", "enum": list(FITS)}}}, save_size, frozenset({SIZING})),

@@ -110,7 +110,7 @@ async def test_size_list_message(ctx) -> None:
     await call(ctx, "send_size_options")
     sent = ctx.messenger.of_kind("list")[-1]
     rows = sent["sections"][0]["rows"]
-    assert [r["id"] for r in rows] == ["size:S", "size:M", "size:L"]
+    assert [r["id"] for r in rows] == ["size:S", "size:M", "size:L", "size:CUSTOM"]
     assert rows[1]["description"] == "Bust 36 · Waist 30 · Hip 39 in"
 
 
@@ -313,3 +313,20 @@ def test_whatsapp_limits_are_enforced() -> None:
     assert len(rows) == 10 and len(lst["action"]["button"]) <= 20
     assert all(len(r["title"]) <= 24 and len(r.get("description", "")) <= 72 for r in rows)
     assert whatsapp_client.clip("✅ Confirm order now!!", 10).endswith("…")
+
+
+async def test_custom_size_skips_height_and_fit_and_goes_to_mybill(ctx) -> None:
+    await call(ctx, "start_order", design_code="KUR-101")
+    assert (await call(ctx, "get_size_chart"))["custom_size"].startswith("If none fits")
+    result = await call(ctx, "save_size", size_code="custom")
+    assert ctx.draft.size_code == "CUSTOM" and ctx.stage == flow.CUSTOMISE        # no height / fit needed
+    assert "error" not in result
+    await call(ctx, "choose_option", option_id=mm.NECK_ROUND)
+    await call(ctx, "choose_option", option_id=mm.SLEEVE_HALF)
+    await call(ctx, "finish_customisation")
+    await call(ctx, "save_delivery_details", name="Asha Rao", line1="12 MG Road", city="Hyderabad",
+               state="Telangana", pincode="500001")
+    assert ctx.mock.quote_calls[-1]["size_code"] == "CUSTOM"
+    await call(ctx, "send_order_summary")
+    summary = ctx.messenger.of_kind("buttons")[-1]["text"]
+    assert "📏 Size: Custom (our tailor will call you after payment)" in summary and "Height" not in summary

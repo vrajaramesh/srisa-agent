@@ -20,6 +20,8 @@ ORDERING_STAGES = (SIZING, CUSTOMISE, ADDRESS, CONFIRM)
 BACK_TARGETS = (SIZING, CUSTOMISE, ADDRESS)
 
 SIZING_FIELDS = ("size_code", "height_cm", "fit_preference")
+# Custom size: our tailor calls her after payment for exact measurements, so height and fit aren't asked.
+CUSTOM_SIZE = "CUSTOM"
 ADDRESS_FIELDS = ("delivery_name", "address_line1", "city", "state", "pincode", "delivery_phone")
 
 MAX_QTY = 5
@@ -59,6 +61,8 @@ def missing_for(stage: str, draft: OrderDraft | None, design_groups: set[str] | 
     if draft is None:
         return ["design_code"] if stage in ORDERING_STAGES else []
     if stage == SIZING:
+        if draft.size_code == CUSTOM_SIZE:
+            return []
         return [f for f in SIZING_FIELDS if getattr(draft, f) in (None, "")]
     if stage == CUSTOMISE:
         missing = sorted((design_groups or set()) - chosen_groups(draft, option_groups or {}))

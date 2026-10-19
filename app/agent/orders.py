@@ -138,7 +138,8 @@ def summary_text(draft: OrderDraft, design: dict[str, Any], quote: dict[str, Any
     """The order summary - every price and date exactly as returned by the mybill quote."""
     b = quote["breakdown"]
     fit = (draft.fit_preference or "").title()
-    size_line = f"📏 Size {draft.size_code}" + (f" · Height {float(draft.height_cm):g} cm" if draft.height_cm else "") \
+    size_line = ("📏 Size: Custom (our tailor will call you after payment)" if draft.size_code == flow.CUSTOM_SIZE
+                 else f"📏 Size {draft.size_code}") + (f" · Height {float(draft.height_cm):g} cm" if draft.height_cm else "") \
         + (f" · {fit} fit" if fit else "")
     opts = ", ".join(f"{o['name']} ({'+' + format_rupees(o['price_delta']) if float(o['price_delta']) else 'included'})"
                      for o in b.get("options", []))
