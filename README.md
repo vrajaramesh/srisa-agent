@@ -165,7 +165,18 @@ The worker's `WorkerMessenger` picks the adapter from `conversation.channel`.
 When the AI hands a chat to the team (`request_human_help`, an LLM failure or an order problem), `needs_human_since` is stamped. Every handover except ones staff caused themselves triggers a staff alert (`app/staff_alerts.py`): an approved WhatsApp template `staff_alert` sent to `STAFF_ALERT_NUMBERS`, linking to `MYBILL_UI_URL/?chat=<id>`. Without numbers it's logged only (`STAFF_NEEDED`).
 
 Template to submit in WhatsApp Manager (Utility, English, 4 variables). The same template is used for every staff alert, including chat handovers and measurement calls:
-`🔔 SRISA staff alert – {{1}} ({{2}}): {{3}}. Open: {{4}}`
+submitted 2026-10-20 (id 4408065276072701):
+```
+🔔 SRISA staff alert
+
+Customer: {{1}}
+Contact: {{2}}
+Action needed: {{3}}
+
+Please follow up with the customer and update the order in mybill: {{4}}
+
+This is an automatic message from the SRISA order assistant.
+```
 
 **Exact measurements:** designs flagged in mybill (`exact_measurements`) produce an `order.paid` event with `exact_measurements_required`. The customer's confirmation gets "📏 Our tailor will call you…", and staff get an alert "📏 call for exact measurements – order SB-…" linking to `MYBILL_UI_URL/?order=SB-…`. The alert goes out even if the customer has no WhatsApp chat, and only once per event.
 

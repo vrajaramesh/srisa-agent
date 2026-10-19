@@ -1,8 +1,8 @@
 """Tell the team when a chat is handed to them (AI asked for help, LLM failure, order problem).
 
 WhatsApp template to STAFF_ALERT_NUMBERS - a template because the shop can't message staff first with free text.
-Template "staff_alert" (Utility), body with 4 parameters, used for every staff alert (chat handovers, measurement calls):
-    🔔 SRISA staff alert – {{1}} ({{2}}): {{3}}. Open: {{4}}
+Template "staff_alert" (Utility, id 4408065276072701), used for every staff alert (handovers, measurement calls):
+    🔔 SRISA staff alert / Customer: {{1}} / Contact: {{2}} / Action needed: {{3}} / ...update the order in mybill: {{4}}
 """
 
 import logging

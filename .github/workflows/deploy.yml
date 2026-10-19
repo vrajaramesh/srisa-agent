@@ -74,6 +74,7 @@ jobs:
             IG_ACCOUNT_ID=17841463885925115
             ALLOWED_IG_SENDERS=1634552674698294
             MYBILL_UI_URL=https://mybill-ui-6rjdx4lmcq-uc.a.run.app
+            STAFF_ALERT_NUMBERS=918008152007
           secrets: |
             WA_ACCESS_TOKEN=WA_ACCESS_TOKEN:latest
             WA_APP_SECRET=WA_APP_SECRET:latest
