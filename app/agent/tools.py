@@ -16,7 +16,8 @@ from dataclasses import dataclass, field
 from decimal import Decimal, InvalidOperation
 from typing import Any
 
-from app.agent import flow, orders
+from app.agent import flow, ig_handoff, orders
+from app.config import get_agent_settings
 from app.agent.flow import ADDRESS, BROWSING, CONFIRM, CUSTOMISE, ORDER_CREATED, SIZING
 from app.agent.formatting import format_rupees
 from app.models import DRAFT_CANCELLED, DRAFT_OPEN, Conversation, OrderDraft
@@ -536,16 +537,10 @@ async def save_delivery_details(ctx: ToolContext, args: dict[str, Any]) -> dict[
     pincode = str(args.get("pincode") or "").strip()
     if not re.fullmatch(r"[1-9][0-9]{5}", pincode):
         missing.append("pincode (6 digits, not starting with 0)")
-    if ctx.conversation.channel == "instagram":
-        # No phone on Instagram: the courier needs a 10-digit Indian mobile.
-        phone = orders.indian_mobile_e164(str(args.get("phone") or "")) or ""
-        if not phone:
-            missing.append("phone (10-digit Indian mobile for the courier)")
-    else:
-        phone = str(args.get("phone") or "").strip() or orders.phone_e164(ctx.conversation)
-        digits = "".join(ch for ch in phone if ch.isdigit())
-        if not 10 <= len(digits) <= 13:
-            missing.append("phone (10-13 digits)")
+    phone = str(args.get("phone") or "").strip() or orders.phone_e164(ctx.conversation)
+    digits = "".join(ch for ch in phone if ch.isdigit())
+    if not 10 <= len(digits) <= 13:
+        missing.append("phone (10-13 digits)")
     if missing:
         return {"error": "invalid_input", "missing_or_invalid": missing}
     for col, value in values.items():
@@ -596,6 +591,28 @@ def _go_back(target: str) -> Callable[[ToolContext, dict[str, Any]], Awaitable[d
         return await progress(ctx)
 
     return handler
+
+
+async def send_whatsapp_order_link(ctx: ToolContext, args: dict[str, Any]) -> dict[str, Any]:
+    """Instagram only: orders are placed on WhatsApp. Sends an "Order on WhatsApp" button (wa.me link with a
+    pre-typed message carrying the design and a ref code that links her Instagram account to her number)."""
+    code = _code(args.get("design_code")) or ctx.conversation.current_product_code
+    design_code = None
+    if code:
+        design = await _fetch_design(ctx, code)
+        if "error" in design:
+            return design
+        design_code = design["code"]
+        ctx.conversation.current_product_code = design_code
+    ref = await ctx.store.create_ref_code(ctx.conversation, design_code)
+    url = ig_handoff.whatsapp_link(get_agent_settings().whatsapp_order_number, ig_handoff.prefilled_text(design_code, ref))
+    body = ("To place your order, continue on WhatsApp 👇 Just press Send there and I'll help you with size, "
+            "options and payment.")
+    if not await ctx.messenger.send_link_button(body, "Order on WhatsApp", url):
+        return {"error": "send_failed"}
+    ctx.actions.append({"action": "whatsapp_order_link", "code": design_code, "ref": ref})
+    return {"sent": True, "design_code": design_code, "ref": ref,
+            "note": "The link opens WhatsApp with her order message ready; she only needs to press Send."}
 
 
 # ── registry ─────────────────────────────────────────────────────────────────
@@ -712,18 +729,35 @@ TOOLS: list[Tool] = [
          {"type": "object", "properties": {}}, _go_back(CUSTOMISE), frozenset({ADDRESS, CONFIRM})),
     Tool("change_address", "Go back to change the delivery address or phone.",
          {"type": "object", "properties": {}}, _go_back(ADDRESS), frozenset({CONFIRM})),
+    # Instagram only (orders are taken on WhatsApp)
+    Tool("send_whatsapp_order_link",
+         "Instagram only. Orders are placed on WhatsApp: when she wants to order or buy, asks how to order, wants a "
+         "price for her size, delivery, payment or custom changes, send this 'Order on WhatsApp' button for the "
+         "design (ask which design first if it isn't clear). Also use it to resend the link.",
+         {"type": "object", "properties": {"design_code": _CODE}}, send_whatsapp_order_link),
 ]
+
+# Instagram is for discovery: browsing tools + the WhatsApp order link. Everything else is WhatsApp only.
+INSTAGRAM_TOOLS = frozenset({"get_design", "list_latest_designs", "send_design_photos", "set_current_design",
+                             "get_size_chart", "request_human_help", "send_whatsapp_order_link"})
+INSTAGRAM_ONLY = frozenset({"send_whatsapp_order_link"})
 
 TOOLS_BY_NAME = {t.name: t for t in TOOLS}
 
 
-def tools_for_stage(stage: str) -> list[Tool]:
-    """Tools offered in a stage, in a fixed order (so each stage's cached prefix stays identical)."""
-    return [t for t in TOOLS if t.allowed_in(stage)]
+def allowed(tool: Tool, stage: str, channel: str = "whatsapp") -> bool:
+    if channel == "instagram":
+        return tool.name in INSTAGRAM_TOOLS
+    return tool.name not in INSTAGRAM_ONLY and tool.allowed_in(stage)
 
 
-def tool_definitions(stage: str = BROWSING) -> list[dict[str, Any]]:
-    return [t.definition() for t in tools_for_stage(stage)]
+def tools_for_stage(stage: str, channel: str = "whatsapp") -> list[Tool]:
+    """Tools offered in a stage on a channel, in a fixed order (so each prefix stays identical for caching)."""
+    return [t for t in TOOLS if allowed(t, stage, channel)]
+
+
+def tool_definitions(stage: str = BROWSING, channel: str = "whatsapp") -> list[dict[str, Any]]:
+    return [t.definition() for t in tools_for_stage(stage, channel)]
 
 
 async def run_tool(ctx: ToolContext, name: str, args: Any) -> tuple[dict[str, Any], bool, int]:
@@ -732,8 +766,10 @@ async def run_tool(ctx: ToolContext, name: str, args: Any) -> tuple[dict[str, An
     tool = TOOLS_BY_NAME.get(name)
     if tool is None:
         result, is_error = {"error": "unknown_tool", "name": name}, True
-    elif not tool.allowed_in(ctx.stage):
+    elif not allowed(tool, ctx.stage, ctx.conversation.channel or "whatsapp"):
         result, is_error = {"error": "not_allowed_in_stage", "stage": ctx.stage, "tool": name}, True
+        if ctx.conversation.channel == "instagram":
+            result["hint"] = "On Instagram, orders are placed on WhatsApp: use send_whatsapp_order_link."
     elif not isinstance(args, dict):
         result, is_error = {"error": "invalid_input"}, True
     else:

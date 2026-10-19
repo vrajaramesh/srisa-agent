@@ -220,41 +220,61 @@ def post_ig(client: TestClient, message: dict, echo: bool = False) -> None:
     assert resp.status_code == 200
 
 
-def test_instagram_chat_order_start_and_numbered_size(client: TestClient, router: respx.MockRouter,
-                                                      ig_api: respx.Route, fake_llm) -> None:
-    mybill = mm.MybillMock(router)
+def test_instagram_tools_are_browsing_plus_whatsapp_link() -> None:
+    from app.agent import tools
+    ig = {t.name for t in tools.tools_for_stage("browsing", "instagram")}
+    assert ig == {"get_design", "list_latest_designs", "send_design_photos", "set_current_design", "get_size_chart",
+                  "request_human_help", "send_whatsapp_order_link"}
+    assert "send_whatsapp_order_link" not in {t.name for t in tools.tools_for_stage("browsing", "whatsapp")}
+    assert "start_order" not in ig
+
+
+def test_instagram_chat_then_order_on_whatsapp_link(client: TestClient, router: respx.MockRouter,
+                                                    ig_api: respx.Route, fake_llm) -> None:
+    mm.MybillMock(router)
     fake_llm.script = [
         llm.text("Hi Asha! 😊 Yes, we have kurtis stitched to your size. Which design do you like?"),
-        llm.tool_use("start_order", {"design_code": "KUR-101"}, block_id="t1"),
-        llm.tool_use("send_size_options", {}, block_id="t2"),
-        llm.text("Lovely! Please pick your size."),
-        llm.text("Got it, size M. What is your height in cm?"),
+        llm.tool_use("start_order", {"design_code": "KUR-101"}, block_id="t0"),        # not offered on Instagram
+        llm.tool_use("send_whatsapp_order_link", {"design_code": "kur-101"}, block_id="t1"),
+        llm.text("Tap the button and press Send in WhatsApp 😊"),
     ]
     post_ig(client, {"text": "Kurtis available?"})
-    post_ig(client, {"text": "I want KUR-101"})
+    post_ig(client, {"text": "I want to order KUR-101"})
 
     sent = ig_sent(ig_api)
     assert sent[0] == {"recipient": {"id": CUSTOMER},
                        "message": {"text": "Hi Asha! 😊 Yes, we have kurtis stitched to your size. Which design do you like?"}}
-    sizes = sent[1]["message"]
-    assert sizes["text"].startswith("Please choose your size 👇") and "• M – Bust 36" in sizes["text"]
-    assert [q["payload"] for q in sizes["quick_replies"]] == ["size:S", "size:M", "size:L"]
-    assert mybill.upserts[-1] == {"instagram_user_id": CUSTOMER, "name": "Asha Rao"}   # name from the profile API
-    assert any(b"sender_action" in c.request.content for c in ig_api.calls)            # mark_seen
-
-    post_ig(client, {"text": "2"})                                 # typed instead of tapping
-    draft, = run_sql(f"SELECT size_code FROM {TEST_SCHEMA}.order_drafts")
-    assert draft["size_code"] == "M"
-    assert ig_sent(ig_api)[-1]["message"]["text"] == "Got it, size M. What is your height in cm?"
-
-    conv, = run_sql(f"SELECT channel, customer_name, profile_username, stage FROM {TEST_SCHEMA}.conversations")
+    template = sent[1]["message"]["attachment"]["payload"]
+    assert template["template_type"] == "button" and template["text"].startswith("To place your order, continue on WhatsApp")
+    button, = template["buttons"]
+    assert button["type"] == "web_url" and button["title"] == "Order on WhatsApp"
+    assert button["url"].startswith("https://wa.me/919491647691?text=Hi%20SRISA%21%20I%27d%20like%20to%20order%20KUR-101")
+    ref = run_sql(f"SELECT code, ig_user_id, design_code, wa_id, expires_at FROM {TEST_SCHEMA}.ref_codes")[0]
+    assert ref["ig_user_id"] == CUSTOMER and ref["design_code"] == "KUR-101" and ref["wa_id"] is None
+    assert ref["code"] in button["url"] and ref["expires_at"] > datetime.now(timezone.utc) + timedelta(days=6)
+    assert sent[2]["message"] == {"text": "Tap the button and press Send in WhatsApp 😊"}
+    # start_order was refused on Instagram (no draft, still browsing).
+    assert run_sql(f"SELECT COUNT(*) AS n FROM {TEST_SCHEMA}.order_drafts")[0]["n"] == 0
+    tool_results = json.dumps(fake_llm.calls[2]["messages"][-1]["content"], default=str)
+    assert "not_allowed_in_stage" in tool_results
+    conv, = run_sql(f"SELECT channel, customer_name, profile_username, current_product_code FROM {TEST_SCHEMA}.conversations")
     assert conv == {"channel": "instagram", "customer_name": "Asha Rao", "profile_username": "asha.styles",
-                    "stage": "sizing"}
+                    "current_product_code": "KUR-101"}
     facts = fake_llm.calls[-1]["system"][1]["text"]
     assert "- Channel: instagram" in facts and "(@asha.styles)" in facts and "Instagram DM text" in facts
-    # Every send was recorded with its Instagram message id (so its echo is recognised as ours).
+    assert {t["name"] for t in fake_llm.calls[-1]["tools"]} >= {"send_whatsapp_order_link"}
     out = run_sql(f"SELECT external_message_id, author FROM {TEST_SCHEMA}.messages WHERE direction = 'out'")
     assert out and all(r["external_message_id"].startswith("mid.out.") and r["author"] == "bot" for r in out)
+
+
+def test_same_ref_is_reused_until_used(client: TestClient, router: respx.MockRouter, ig_api: respx.Route,
+                                       fake_llm) -> None:
+    mm.MybillMock(router)
+    fake_llm.script = [llm.tool_use("send_whatsapp_order_link", {"design_code": "KUR-101"}, block_id="a"), llm.text("ok"),
+                       llm.tool_use("send_whatsapp_order_link", {}, block_id="b"), llm.text("again")]
+    post_ig(client, {"text": "order KUR-101"})
+    post_ig(client, {"text": "send the link again"})          # no code: uses the current design
+    assert run_sql(f"SELECT COUNT(*) AS n FROM {TEST_SCHEMA}.ref_codes")[0]["n"] == 1
 
 
 def test_photos_send_caption_as_separate_text(client: TestClient, router: respx.MockRouter, ig_api: respx.Route,
@@ -266,31 +286,6 @@ def test_photos_send_caption_as_separate_text(client: TestClient, router: respx.
     assert sent[0]["message"] == {"attachment": {"type": "image", "payload": {"url": "https://img.test/kur-101.jpg"}}}
     assert sent[1]["message"] == {"text": "Anarkali Kurta – ₹1,899"}
     assert sent[2]["message"] == {"text": "Here it is 😊"}
-
-
-def test_courier_phone_required_on_instagram(client: TestClient, router: respx.MockRouter, ig_api: respx.Route,
-                                             fake_llm) -> None:
-    mm.MybillMock(router)
-    results = []
-
-    def capture(kwargs):
-        results.append(kwargs["messages"][-1]["content"])
-        return llm.text("Please share a 10-digit mobile number for the courier.")
-
-    fake_llm.script = [
-        llm.response(llm.tool_block("start_order", {"design_code": "KUR-101"}, "t1"),
-                     llm.tool_block("save_size", {"size_code": "M", "height_cm": 160, "fit_preference": "REGULAR"}, "t2"),
-                     stop_reason="tool_use"),
-        llm.response(llm.tool_block("choose_option", {"option_id": mm.NECK_ROUND}, "t3a"),
-                     llm.tool_block("choose_option", {"option_id": mm.SLEEVE_HALF}, "t3b"),
-                     llm.tool_block("finish_customisation", {}, "t3"), stop_reason="tool_use"),
-        llm.tool_use("save_delivery_details", {"name": "Asha", "line1": "12 MG Road", "city": "Hyderabad",
-                                               "state": "Telangana", "pincode": "500001"}, block_id="t4"),
-        capture,
-    ]
-    post_ig(client, {"text": "order KUR-101"})
-    tool_result = json.dumps(results[-1], default=str)
-    assert "10-digit Indian mobile for the courier" in tool_result
 
 
 def test_staff_reply_from_the_app_stops_the_bot(client: TestClient, router: respx.MockRouter, ig_api: respx.Route,

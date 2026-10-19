@@ -144,7 +144,10 @@ The worker's `WorkerMessenger` picks the adapter from `conversation.channel`.
 - **Limits:**
   - No reply more than 24 h after the customer's last message.
   - Only `ALLOWED_IG_SENDERS` (Instagram-scoped user ids) get replies while it's set.
-- **Customers:** name and username are fetched once from the User Profile API. The mybill customer is upserted by `instagram_user_id`, and the address step requires a 10-digit Indian mobile.
+- **Customers:** name and username are fetched once from the User Profile API.
+- **Instagram is for discovery, WhatsApp for ordering.** On Instagram the agent only gets browsing tools plus `send_whatsapp_order_link`, which sends an "Order on WhatsApp" button: a wa.me link with the message pre-typed, e.g. "Hi SRISA! I'd like to order KUR-101 🛍️ (ref IG-7K3QA)". The `ref_codes` row (Instagram user, design, 7-day expiry) records the handoff.
+  - When she sends that message on WhatsApp (`agent/ig_handoff.py` + `worker._instagram_handoff_path`): the ref is marked used, the conversation records `entry_source_type='instagram'`, and mybill gets an upsert with phone + `instagram_user_id`, which merges the two customers.
+  - A fresh chat then starts like the ad flow (photo + Order / Photos / Size guide), and the whole order runs on WhatsApp.
 - **Token:** `IG_ACCESS_TOKEN` is read from Secret Manager at runtime and cached for 1 h. Locally, use the `IG_ACCESS_TOKEN` env var.
 - **Config:** `IG_ACCOUNT_ID` (srisa_fabrics: 17841463885925115).
 

@@ -14,6 +14,7 @@ class MemoryStore:
 
     def __init__(self) -> None:
         self.drafts: dict[uuid.UUID, OrderDraft] = {}
+        self.ref_codes: dict[str, dict[str, Any]] = {}
 
     async def new_draft(self, conversation: Conversation) -> OrderDraft:
         draft = OrderDraft(id=uuid.uuid4(), conversation_id=conversation.id, status=DRAFT_OPEN, version=1,
@@ -27,6 +28,12 @@ class MemoryStore:
     async def latest_order_no(self, conversation: Conversation) -> str | None:
         submitted = [d for d in self.drafts.values() if d.conversation_id == conversation.id and d.mybill_order_no]
         return submitted[-1].mybill_order_no if submitted else None
+
+    async def create_ref_code(self, conversation: Conversation, design_code: str | None) -> str:
+        from app.agent import ig_handoff
+        code = ig_handoff.new_ref_code()
+        self.ref_codes[code] = {"ig_user_id": conversation.external_user_id, "design_code": design_code}
+        return code
 
     def open_draft(self, conversation_id: uuid.UUID) -> OrderDraft | None:
         return next((d for d in self.drafts.values()
@@ -66,6 +73,9 @@ class RecordingMessenger:
     async def send_list(self, body: str, button_text: str, sections: list[dict[str, Any]],
                         meta: dict | None = None) -> bool:
         return self._record("list", body, {"button_text": button_text, "sections": sections}, meta)
+
+    async def send_link_button(self, body: str, button_text: str, url: str) -> bool:
+        return self._record("link", body, {"button_text": button_text, "url": url}, None)
 
     def of_kind(self, kind: str) -> list[dict[str, Any]]:
         return [m for m in self.sent if m["kind"] == kind]

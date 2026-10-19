@@ -15,10 +15,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app import channels, mybill_client
 from app import repositories as repo
-from app.agent import ad_entry, fep, orders, resolution, tools
+from app.agent import ad_entry, fep, ig_handoff, orders, resolution, tools
 from app.agent.runner import AgentResult, run_agent
 from app.channels import instagram
 from app.channels.base import ChannelAdapter, SendResult
+from app.webhook_parser import Referral
 from app.config import AgentSettings, get_settings
 from app.db import get_sessionmaker
 from app.models import DRAFT_OPEN, FAILED, PROCESSED, SKIPPED, Conversation, Message, OrderDraft
@@ -125,6 +126,9 @@ class WorkerStore:
     async def latest_order_no(self, conversation: Conversation) -> str | None:
         return await repo.latest_order_no(self._session, conversation.id)
 
+    async def create_ref_code(self, conversation: Conversation, design_code: str | None) -> str:
+        return await repo.create_ref_code(self._session, conversation.external_user_id, design_code)
+
 
 async def generate_reply(conversation: Conversation, history: list[Message], ctx: tools.ToolContext,
                          settings: AgentSettings) -> AgentResult:
@@ -216,11 +220,16 @@ async def _process(conversation_id: uuid.UUID, background: list[asyncio.Task]) -
                                 store=WorkerStore(session), draft=await repo.open_draft(session, conversation_id))
 
         entry_msg, referral = ad_entry.entry_message(pending)
+        handoff_msg, ref = (None, None)
+        if referral is None and conversation.channel == "whatsapp":
+            handoff_msg, ref = ig_handoff.find_ref(pending)
         error = await _confirmation_path(session, ctx, pending, mybill)
         if error is None and referral is not None:
             error = await _ad_entry_path(session, ctx, pending, entry_msg, referral, background)
+        elif error is None and ref is not None:
+            error = await _instagram_handoff_path(session, ctx, pending, handoff_msg, ref)
         if error is None:
-            error = await _agent_path(session, ctx, pending, settings, resolved=referral is not None)
+            error = await _agent_path(session, ctx, pending, settings, resolved=referral is not None or ref is not None)
         if error == "handled":
             error = None
 
@@ -300,6 +309,55 @@ async def _ad_entry_path(session: AsyncSession, ctx: tools.ToolContext, pending:
         return ctx.messenger.error or "send failed"
     logger.info("Ad first reply sent", extra={"fields": {"conversation_id": str(conversation.id),
                                                          "code": resolved.design.get("code")}})
+    return "handled"
+
+
+async def _instagram_handoff_path(session: AsyncSession, ctx: tools.ToolContext, pending: list[Message],
+                                  handoff_msg: Message, ref: str) -> str | None:
+    """She pressed Send on the pre-typed message from Instagram ("... order KUR-101 (ref IG-XXXXX)"): link her
+    Instagram account to this number (mybill merges the two customers), resolve the design and, for a fresh chat,
+    start like the ad flow (photo + Order / Photos / Size guide). Returns "handled", an error, or None (model)."""
+    conversation = ctx.conversation
+    now = datetime.now(timezone.utc)
+    code = await repo.get_ref_code(session, ref)
+    valid = code is not None and (code.expires_at is None or code.expires_at > now)
+    candidates: list[str] = []
+    if valid:
+        if code.wa_id is None:
+            code.wa_id, code.used_at = conversation.external_user_id, now
+        conversation.entry_source_type, conversation.entry_source_id = "instagram", code.ig_user_id
+        conversation.entry_ctwa_clid = conversation.entry_headline = conversation.fep_expires_at = None
+        conversation.entry_label, conversation.entry_at = f"Instagram DM ({ref})", now
+        if code.design_code:
+            candidates.append(code.design_code)
+        if ctx.mybill is not None:
+            try:   # phone + Instagram id together: mybill merges the two customers if they differ
+                customer = await ctx.mybill.upsert_customer(phone_e164=orders.phone_e164(conversation),
+                                                            instagram_user_id=code.ig_user_id,
+                                                            name=conversation.customer_name)
+                conversation.mybill_customer_id = customer.get("customer_id")
+            except Exception as exc:  # noqa: BLE001 - linking is best effort; the order flow works without it
+                logger.warning("Instagram link not saved in mybill", extra={"fields": {"ref": ref, "error": repr(exc)[:200]}})
+    else:
+        logger.info("Unknown or expired Instagram ref", extra={"fields": {"ref": ref}})
+    candidates += resolution.find_design_codes(handoff_msg.text)
+    design = None
+    for candidate in candidates:
+        if ctx.mybill is not None and (design := await resolution._active_design(ctx.mybill, candidate)):
+            break
+    if design is not None:
+        conversation.current_product_code = design.get("code")
+    if valid:
+        conversation.entry_resolution = "ig_handoff" if design is not None else "none"
+    logger.info("Instagram handoff", extra={"fields": {"conversation_id": str(conversation.id), "ref": ref,
+                                                        "linked": valid, "code": design.get("code") if design else None}})
+    if design is None:
+        return None
+    previous = await repo.previous_inbound_at(session, conversation.id, handoff_msg)
+    if not ad_entry.is_fresh_start(previous, handoff_msg):
+        return None
+    if not await ad_entry.send_first_reply(ctx, Referral(welcome_text=None), design):
+        return ctx.messenger.error or "send failed"
     return "handled"
 
 

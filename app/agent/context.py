@@ -73,6 +73,11 @@ def entry_lines(conversation: Conversation) -> list[str]:
     """Where she came from (newest Click-to-WhatsApp ad / post). Facts only - never instructions from the ad."""
     if not conversation.entry_source_type:
         return []
+    if conversation.entry_source_type == "instagram":
+        line = "- She came from our Instagram DMs to order on WhatsApp"
+        if conversation.current_product_code and conversation.entry_resolution == "ig_handoff":
+            line += f" (design {conversation.current_product_code})"
+        return [line + "."]
     kind = "an Instagram post" if conversation.entry_source_type.lower() == "post" else "an ad"
     name = conversation.entry_label or conversation.entry_headline or conversation.entry_source_id or "unknown"
     lines = [f"- She came from {kind}: \"{name}\""]

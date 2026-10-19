@@ -34,6 +34,8 @@ class AgentSettings(BaseSettings):
     llm_effort: str = "low"
     history_messages: int = 20
     brand_name: str = "SRISA Boutique"
+    # The shop's WhatsApp number (digits) for the "Order on WhatsApp" link sent on Instagram.
+    whatsapp_order_number: str = "919491647691"
 
     # mybill-service /api/agent/** (read-only catalog for the agent's tools).
     mybill_base_url: str = ""  # e.g. https://mybill-service-276371417285.us-central1.run.app

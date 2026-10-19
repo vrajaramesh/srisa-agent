@@ -23,6 +23,7 @@ from app.models import (
     LlmTurn,
     Message,
     OrderDraft,
+    RefCode,
 )
 from app.webhook_parser import IncomingMessage, StatusUpdate
 
@@ -300,3 +301,29 @@ async def previous_inbound_at(session: AsyncSession, conversation_id: uuid.UUID,
         .limit(1)
     )
     return (await session.execute(stmt)).scalar_one_or_none()
+
+
+async def create_ref_code(session: AsyncSession, ig_user_id: str, design_code: str | None) -> str:
+    """A handoff code for this Instagram user + design; reuses an unused, unexpired one."""
+    from app.agent import ig_handoff
+    now = datetime.now(timezone.utc)
+    stmt = (select(RefCode)
+            .where(RefCode.ig_user_id == ig_user_id, RefCode.used_at.is_(None), RefCode.expires_at > now,
+                   RefCode.design_code.is_not_distinct_from(design_code))
+            .order_by(RefCode.created_at.desc()).limit(1))
+    existing = (await session.execute(stmt)).scalar_one_or_none()
+    if existing is not None:
+        return existing.code
+    for _ in range(5):
+        code = ig_handoff.new_ref_code()
+        inserted = (await session.execute(
+            pg_insert(RefCode).values(code=code, ig_user_id=ig_user_id, design_code=design_code,
+                                      expires_at=ig_handoff.ref_expiry(now))
+            .on_conflict_do_nothing(index_elements=["code"]).returning(RefCode.code))).scalar_one_or_none()
+        if inserted:
+            return inserted
+    raise RuntimeError("could not allocate a ref code")
+
+
+async def get_ref_code(session: AsyncSession, code: str) -> RefCode | None:
+    return await session.get(RefCode, code.upper())
