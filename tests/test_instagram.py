@@ -247,14 +247,12 @@ def test_instagram_chat_then_order_on_whatsapp_link(client: TestClient, router: 
     ref = run_sql(f"SELECT code, ig_user_id, design_code, wa_id, expires_at FROM {TEST_SCHEMA}.ref_codes")[0]
     assert ref["ig_user_id"] == CUSTOMER and ref["design_code"] == "KUR-101" and ref["wa_id"] is None
     assert ref["expires_at"] > datetime.now(timezone.utc) + timedelta(days=6)
-    link_text = sent[1]["message"]["text"]
-    assert link_text.startswith("To order KUR-101, continue on WhatsApp 👇\nhttps://srisa.test/wa/" + ref["code"])
-    # The short link redirects to wa.me with the pre-typed order message.
-    resp = client.get(f"/wa/{ref['code'].lower()}", follow_redirects=False)
-    assert resp.status_code == 302
-    assert resp.headers["location"] == ("https://wa.me/919491647691?text=Hi%20SRISA%21%20I%27d%20like%20to%20order%20"
-                                        f"KUR-101%20%F0%9F%9B%8D%EF%B8%8F%20%28ref%20{ref['code']}%29")
-    assert client.get("/wa/nonsense", follow_redirects=False).headers["location"].startswith("https://wa.me/919491647691?text=Hi")
+    # "Order on WhatsApp" button (clickable in the Instagram app); the text carries the short link for the browser.
+    short = f"https://srisafabrics.com/wa/KUR-101/{ref['code']}"
+    template = sent[1]["message"]["attachment"]["payload"]
+    assert template["template_type"] == "button" and template["text"].startswith("To order KUR-101, continue on WhatsApp 👇")
+    assert template["text"].endswith("\n" + short)
+    assert template["buttons"] == [{"type": "web_url", "url": short, "title": "Order on WhatsApp"}]
     assert sent[2]["message"] == {"text": "Tap the button and press Send in WhatsApp 😊"}
     # start_order was refused on Instagram (no draft, still browsing).
     assert run_sql(f"SELECT COUNT(*) AS n FROM {TEST_SCHEMA}.order_drafts")[0]["n"] == 0

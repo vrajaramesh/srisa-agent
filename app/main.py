@@ -113,28 +113,6 @@ async def receive_webhook(request: Request, background: BackgroundTasks) -> Resp
     return Response(status_code=200)
 
 
-@app.get("/wa/{ref}")
-async def whatsapp_order_redirect(ref: str) -> Response:
-    """Short "Order on WhatsApp" link sent on Instagram: redirects to wa.me with the pre-typed order message."""
-    from fastapi.responses import RedirectResponse
-    from app.agent import ig_handoff
-    code = ref.upper()
-    design = None
-    if ig_handoff.REF_RE.fullmatch(code):
-        try:
-            async with get_sessionmaker()() as session:
-                row = await repo.get_ref_code(session, code)
-                design = row.design_code if row else None
-        except (SQLAlchemyError, OSError):
-            logger.exception("Ref lookup failed; redirecting without the design")
-    else:
-        code = ""
-    text = ig_handoff.prefilled_text(design, code) if code else "Hi SRISA! I'd like to place an order 🛍️"
-    url = ig_handoff.whatsapp_link(get_settings().whatsapp_order_number, text)
-    logger.info("WhatsApp order link opened", extra={"fields": {"ref": code or None, "design": design}})
-    return RedirectResponse(url, status_code=302)
-
-
 @app.get("/webhook/instagram")
 async def verify_instagram_webhook(
     mode: str | None = Query(None, alias="hub.mode"),

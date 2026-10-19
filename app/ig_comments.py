@@ -63,7 +63,7 @@ def private_text(username: str | None, design: dict | None, link: str) -> str:
     else:
         intro = f"{hi} Thanks for your comment."
         after = "Just press Send there, tell us which design you liked, and we'll help you with size and payment."
-    return f"{intro}\n\nTo order, tap to message us on WhatsApp 👇\n{link}\n\n{after}"
+    return f"{intro}\n\nTo order, tap below to message us on WhatsApp 👇 {after}\n{link}"
 
 
 def public_text(username: str | None, code: str | None) -> str:
@@ -136,7 +136,7 @@ async def process_comment(comment_id: str) -> str:
                 else ig_handoff.whatsapp_link(settings.whatsapp_order_number, ig_handoff.prefilled_text(code, ref)))
         text = private_text(row.username, design, link)
 
-        sent = await instagram.InstagramAdapter().send_private_reply(comment_id, text)
+        sent = await instagram.InstagramAdapter().send_private_reply(comment_id, text, button_url=link)
         if not sent.ok:
             return done(FAILED, sent.error)
         repo.add_outbound_message(session, conversation_id, text, sent.message_id, {**(sent.data or {}),

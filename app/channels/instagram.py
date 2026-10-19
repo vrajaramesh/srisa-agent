@@ -380,7 +380,7 @@ class InstagramAdapter(ChannelAdapter):
                 return sent
         else:
             sent = None
-        fallback = await self.send_text(to, f"{body}\n{url}")
+        fallback = await self.send_text(to, body if url in body else f"{body}\n{url}")
         if fallback.ok and sent is not None:
             _failed_formats["button_template"] = _clock() + FORMAT_FAILURE_SECONDS
             logger.warning("Instagram button template rejected; using plain links for an hour")
@@ -389,7 +389,20 @@ class InstagramAdapter(ChannelAdapter):
     async def mark_seen(self, to: str, message_id: str | None) -> SendResult:
         return await self._post({"recipient": {"id": to}, "sender_action": "mark_seen"}, "mark_seen")
 
-    async def send_private_reply(self, comment_id: str, text: str) -> SendResult:
-        """Private reply: a DM to the person who wrote the comment (one per comment, within 7 days)."""
-        return await self._post({"recipient": {"comment_id": comment_id},
+    async def send_private_reply(self, comment_id: str, text: str, button_url: str | None = None,
+                                 button_title: str = "Order on WhatsApp") -> SendResult:
+        """Private reply: a DM to the person who wrote the comment (one per comment, within 7 days).
+        With button_url, tried first as a button template (links in plain DM text aren't clickable in the
+        Instagram app); if Meta rejects that, plain text (remembered for an hour, like other formats)."""
+        recipient = {"comment_id": comment_id}
+        if button_url and _format_ok("private_reply_button"):
+            sent = await self._post({"recipient": recipient, "message": {"attachment": {"type": "template", "payload": {
+                "template_type": "button", "text": _clip(text, BUTTON_TEMPLATE_TEXT),
+                "buttons": [{"type": "web_url", "url": button_url, "title": _clip(button_title, BUTTON_TITLE)}]}}}},
+                "private_reply_button")
+            if sent.ok:
+                return sent
+            _failed_formats["private_reply_button"] = _clock() + FORMAT_FAILURE_SECONDS
+            logger.warning("Instagram rejected a button in a private reply; sending text")
+        return await self._post({"recipient": recipient,
                                  "message": {"text": _clip_bytes(text, MAX_TEXT_BYTES)}}, "private_reply")

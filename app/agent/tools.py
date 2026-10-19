@@ -617,14 +617,15 @@ async def send_whatsapp_order_link(ctx: ToolContext, args: dict[str, Any]) -> di
         ctx.conversation.current_product_code = design_code
     ref = await ctx.store.create_ref_code(ctx.conversation, design_code)
     settings = get_agent_settings()
-    # A short link to our /wa/{ref} redirect (Instagram web doesn't show template buttons, so a plain clickable
-    # link works everywhere); without a public URL, the full wa.me link.
-    url = (f"{settings.public_base_url.rstrip('/')}/wa/{ref}" if settings.public_base_url
+    # Short link on our domain (srisafabrics.com/wa/KUR-101/IG-XXXXX -> wa.me with the pre-typed message).
+    # Sent as an "Order on WhatsApp" button (clickable in the Instagram app); the text carries the link too for
+    # instagram.com in a browser, which doesn't show template buttons.
+    url = (ig_handoff.short_link(settings.order_link_base, design_code, ref) if settings.order_link_base
            else ig_handoff.whatsapp_link(settings.whatsapp_order_number, ig_handoff.prefilled_text(design_code, ref)))
     what = f" {design_code}" if design_code else ""
-    text = (f"To order{what}, continue on WhatsApp 👇\n{url}\n\nThe link opens WhatsApp with your order message "
-            "ready - just press Send and I'll help you with size, options and payment there.")
-    if not await ctx.messenger.send_text(text):
+    body = (f"To order{what}, continue on WhatsApp 👇 Just press Send there and I'll help you with size, options "
+            f"and payment.\n{url}")
+    if not await ctx.messenger.send_link_button(body, "Order on WhatsApp", url):
         return {"error": "send_failed"}
     ctx.actions.append({"action": "whatsapp_order_link", "code": design_code, "ref": ref})
     return {"sent": True, "design_code": design_code, "ref": ref,

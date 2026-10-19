@@ -17,6 +17,14 @@ from tests.conftest import IG_MESSAGES_URL, TEST_SCHEMA, load_fixture, run_sql, 
 
 CUSTOMER, SHOP, MEDIA = "1000000000000001", "17841400000000000", "18353818843220298"
 MEDIA_URL = f"https://graph.instagram.com/v25.0/{MEDIA}"
+
+
+@pytest.fixture(autouse=True)
+def _reset_formats() -> None:
+    from app.channels import instagram
+    instagram.clear_format_failures()
+
+
 CAPTION = "✨ Elegance in every weave! ✨ Chiffon tissue with border work.\nCode: KUR-101\nDM us to order 💜"
 
 
@@ -76,11 +84,14 @@ def test_buying_comment_gets_private_dm_with_whatsapp_link_and_public_reply(clie
     cid = post_comment(client, "Price please?")
     dm, = [json.loads(c.request.content) for c in ig["sends"].calls]
     assert dm["recipient"] == {"comment_id": cid}
-    text = dm["message"]["text"]
+    template = dm["message"]["attachment"]["payload"]
+    text = template["text"]
     assert text.startswith("Hi @asha.styles! 😊 Thanks for your interest in Anarkali Kurta (KUR-101) – ₹1,899, "
                            "stitched to your size in 7 days 🧵")
     ref = run_sql(f"SELECT code, ig_user_id, design_code FROM {TEST_SCHEMA}.ref_codes")[0]
-    assert f"\nhttps://srisafabrics.com/wa/KUR-101/{ref['code']}\n" in text      # short, clickable on Instagram
+    short = f"https://srisafabrics.com/wa/KUR-101/{ref['code']}"
+    assert text.endswith("\n" + short)                                     # for instagram.com in a browser
+    assert template["buttons"] == [{"type": "web_url", "url": short, "title": "Order on WhatsApp"}]   # app
     assert ref["ig_user_id"] == CUSTOMER and ref["design_code"] == "KUR-101"
 
     public = ig["replies"].calls[0].request
@@ -123,10 +134,13 @@ def test_skips_own_compliments_repeats_and_duplicates(client: TestClient, ig, fa
 def test_unknown_design_still_sends_whatsapp_link(client: TestClient, router: respx.MockRouter, fake_llm) -> None:
     mm.MybillMock(router)
     router.get(MEDIA_URL).mock(return_value=Response(200, json={"caption": "Festive collection ✨"}))
-    sends = router.post(IG_MESSAGES_URL).mock(return_value=Response(200, json={"message_id": "mid.pr.1"}))
+    # Meta rejects the button in a private reply -> plain text with the link.
+    sends = router.post(IG_MESSAGES_URL).mock(side_effect=lambda r: Response(400, json={"error": {"code": 100}})
+                                              if b"attachment" in r.content else Response(200, json={"message_id": "mid.pr.1"}))
     router.post(url__regex=r".*/replies").mock(return_value=Response(200, json={"id": "1"}))
     cid = post_comment(client, "price?")
-    text = json.loads(sends.calls[0].request.content)["message"]["text"]
+    assert len(sends.calls) == 2
+    text = json.loads(sends.calls[1].request.content)["message"]["text"]
     assert "Thanks for your comment." in text and "tell us which design you liked" in text
     assert "\nhttps://srisafabrics.com/wa/IG-" in text
     assert comment_row(cid)["design_code"] is None
