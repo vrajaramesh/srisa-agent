@@ -14,6 +14,7 @@ from sqlalchemy import select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from app import repositories as repo
+from app import staff_alerts
 from app.agent.formatting import format_rupees
 from app.db import get_sessionmaker
 from app.models import Conversation, ProcessedEvent
@@ -30,6 +31,9 @@ class PaymentEvent(BaseModel):
     amount: float | None = None
     estimated_delivery_date: str | None = None
     event_id: str
+    exact_measurements_required: bool = False   # the tailor calls her for exact measurements (design flag)
+    design_code: str | None = None
+    design_name: str | None = None
 
 
 def _first_name(name: str | None) -> str:
@@ -49,8 +53,12 @@ def message_for(event: PaymentEvent) -> str | None:
         thanks = f"Thank you, {_first_name(event.customer_name)}! " if _first_name(event.customer_name) else "Thank you! "
         amount = f" ({format_rupees(event.amount)})" if event.amount is not None else ""
         eta = _date(event.estimated_delivery_date)
-        return (f"✅ Payment received for order {event.order_no}{amount}. {thanks}"
+        text = (f"✅ Payment received for order {event.order_no}{amount}. {thanks}"
                 f"Your outfit is now with our tailor 🧵" + (f" - estimated delivery {eta}." if eta else "."))
+        if event.exact_measurements_required:
+            phone = f" on {event.customer_phone}" if event.customer_phone else ""
+            text += f"\n📏 Our tailor will call you{phone} shortly to take your exact measurements."
+        return text
     if event.event == "payment_link.expired":
         return f"⏰ The payment link for order {event.order_no} has expired. Reply \"pay\" and I'll send you a new one."
     if event.event == "payment_link.cancelled":
@@ -59,7 +67,8 @@ def message_for(event: PaymentEvent) -> str | None:
 
 
 async def handle(event: PaymentEvent) -> dict[str, Any]:
-    """Send the message once. Returns {"status": ...}; raises RuntimeError if WhatsApp failed (-> 500, mybill retries)."""
+    """Send the message once. Returns {"status": ...}; raises RuntimeError if WhatsApp failed (-> 500, mybill retries).
+    A paid order that needs exact measurements also alerts the staff (once, after the event is recorded)."""
     text = message_for(event)
     if text is None:
         return {"status": "ignored_event_type"}
@@ -77,10 +86,16 @@ async def handle(event: PaymentEvent) -> dict[str, Any]:
         )).scalar_one_or_none()
         if conversation is None:
             logger.warning("Payment event for unknown customer", extra={"fields": {"order_no": event.order_no}})
-            return {"status": "unknown_customer"}
-        await repo.lock_conversation(session, conversation.id)
-        messenger = WorkerMessenger(session, conversation)
-        if not await messenger.send_text(text):
-            raise RuntimeError(f"WhatsApp send failed: {messenger.error}")
-        logger.info("PAYMENT_EVENT_SENT", extra={"fields": {"event": event.event, "order_no": event.order_no}})
-    return {"status": "sent"}
+            status = "unknown_customer"
+        else:
+            await repo.lock_conversation(session, conversation.id)
+            messenger = WorkerMessenger(session, conversation)
+            if not await messenger.send_text(text):
+                raise RuntimeError(f"WhatsApp send failed: {messenger.error}")
+            logger.info("PAYMENT_EVENT_SENT", extra={"fields": {"event": event.event, "order_no": event.order_no}})
+            status = "sent"
+    if event.event == "order.paid" and event.exact_measurements_required:
+        design = " ".join(p for p in (event.design_code, event.design_name) if p) or None
+        await staff_alerts.alert_measurement_call(event.order_no, event.customer_name, event.customer_phone,
+                                                  design, event.amount)
+    return {"status": status}

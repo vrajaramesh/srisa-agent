@@ -1,8 +1,8 @@
 """Tell the team when a chat is handed to them (AI asked for help, LLM failure, order problem).
 
 WhatsApp template to STAFF_ALERT_NUMBERS - a template because the shop can't message staff first with free text.
-Template "staff_alert" (Utility), body with 4 parameters:
-    ⚠️ Customer needs help: {{1}} ({{2}}). Reason: {{3}}. Open the chat: {{4}}
+Template "staff_alert" (Utility), body with 4 parameters, used for every staff alert (chat handovers, measurement calls):
+    🔔 SRISA staff alert – {{1}} ({{2}}): {{3}}. Open: {{4}}
 """
 
 import logging
@@ -33,15 +33,32 @@ def describe(conversation: Conversation) -> tuple[str, str]:
 
 
 async def alert_staff(conversation: Conversation) -> int:
-    """Send the alert to every configured number; returns how many were sent. Never raises."""
+    """A chat was handed to the team. Returns how many alerts were sent. Never raises."""
+    settings = get_settings()
+    name, contact = describe(conversation)
+    reason = "needs help – " + (conversation.needs_human_reason or "unspecified").replace("_", " ")
+    link = (f"{settings.mybill_ui_url.rstrip('/')}/?chat={conversation.id}" if settings.mybill_ui_url
+            else "mybill-ui > Boutique > Customer chats")
+    logger.warning("STAFF_NEEDED", extra={"fields": {"conversation_id": str(conversation.id), "reason": reason,
+                                                     "channel": conversation.channel}})
+    return await send_alert(name, contact, reason, link)
+
+
+async def alert_measurement_call(order_no: str, name: str | None, phone: str | None, design: str | None,
+                                 amount: float | None) -> int:
+    """A paid order needs the tailor to call the customer for exact measurements."""
+    settings = get_settings()
+    paid = f", paid ₹{amount:,.0f}" if amount is not None else ""
+    reason = f"📏 call for exact measurements – order {order_no}" + (f" ({design})" if design else "") + paid
+    link = (f"{settings.mybill_ui_url.rstrip('/')}/?order={order_no}" if settings.mybill_ui_url
+            else "mybill-ui > Boutique > WhatsApp Orders")
+    logger.warning("MEASUREMENT_CALL_NEEDED", extra={"fields": {"order_no": order_no}})
+    return await send_alert(name or "Customer", phone or "-", reason, link)
+
+
+async def send_alert(name: str, contact: str, reason: str, link: str) -> int:
     settings = get_settings()
     numbers = settings.staff_alert_number_list
-    name, contact = describe(conversation)
-    reason = (conversation.needs_human_reason or "needs help").replace("_", " ")
-    link = (f"{settings.mybill_ui_url.rstrip('/')}/?chat={conversation.id}" if settings.mybill_ui_url
-            else "mybill-ui > Customer chats")
-    logger.warning("STAFF_NEEDED", extra={"fields": {"conversation_id": str(conversation.id), "reason": reason,
-                                                     "channel": conversation.channel, "alert_numbers": len(numbers)}})
     sent = 0
     for number in numbers:
         try:

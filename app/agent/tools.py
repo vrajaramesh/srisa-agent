@@ -186,6 +186,7 @@ async def get_design(ctx: ToolContext, args: dict[str, Any]) -> dict[str, Any]:
             for g in design.get("option_groups", [])
         ],
         "image_count": len(design.get("images", [])),
+        "exact_measurements_needed": bool(design.get("exact_measurements")),
     }
 
 
@@ -336,6 +337,10 @@ async def start_order(ctx: ToolContext, args: dict[str, Any]) -> dict[str, Any]:
 
     result: dict[str, Any] = {"ok": True, "design": {"code": design["code"], "name": design["name"]},
                               "has_saved_measurements": saved is not None}
+    if design.get("exact_measurements"):
+        result["exact_measurements_needed"] = True
+        result["tell_customer"] = ("For this design our tailor will call her after payment to take her exact "
+                                   "measurements; she still picks her nearest size now.")
     if saved:
         result["saved_measurements"] = {k: saved.get(k) for k in
                                         ("size_code", "height_cm", "fit_preference", "bust_in", "waist_in", "hip_in")

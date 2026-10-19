@@ -74,3 +74,40 @@ def test_failed_send_is_retried_by_mybill(client: TestClient, authorized) -> Non
         route = mock.post(MESSAGES_URL).mock(return_value=Response(200, json={"messages": [{"id": "wamid.ok"}]}))
         assert _post(client, EVENT).json() == {"status": "sent"}
         assert len(route.calls) == 1
+
+
+MEASURE = {**EVENT, "event_id": "evt_measure", "exact_measurements_required": True, "design_code": "BLO-12",
+           "design_name": "Designer Blouse"}
+
+
+def _templates(route: respx.Route) -> list[dict]:
+    return [b for b in (json.loads(c.request.content) for c in route.calls) if b.get("type") == "template"]
+
+
+def test_paid_order_needing_exact_measurements_tells_customer_and_alerts_staff(
+        client: TestClient, graph_api: respx.Route, authorized, monkeypatch) -> None:
+    from app.config import get_settings
+    monkeypatch.setenv("STAFF_ALERT_NUMBERS", "919441200001")
+    monkeypatch.setenv("MYBILL_UI_URL", "https://mybill.test")
+    get_settings.cache_clear()
+    _conversation()
+    assert _post(client, MEASURE).json() == {"status": "sent"}
+    assert sent_texts(graph_api)[-1].endswith(
+        "\n📏 Our tailor will call you on +919876543210 shortly to take your exact measurements.")
+    alert, = _templates(graph_api)
+    assert alert["to"] == "919441200001" and alert["template"]["name"] == "staff_alert"
+    params = [p["text"] for p in alert["template"]["components"][0]["parameters"]]
+    assert params == ["Asha Rao", "+919876543210",
+                      "📏 call for exact measurements – order SB-1001 (BLO-12 Designer Blouse), paid ₹2,149",
+                      "https://mybill.test/?order=SB-1001"]
+    assert _post(client, MEASURE).json() == {"status": "duplicate"}
+    assert len(_templates(graph_api)) == 1                      # alerted once
+
+
+def test_measurement_alert_even_without_a_whatsapp_chat(client: TestClient, graph_api: respx.Route, authorized,
+                                                        monkeypatch) -> None:
+    from app.config import get_settings
+    monkeypatch.setenv("STAFF_ALERT_NUMBERS", "919441200001")
+    get_settings.cache_clear()
+    assert _post(client, {**MEASURE, "event_id": "evt_m2"}).json() == {"status": "unknown_customer"}
+    assert len(_templates(graph_api)) == 1 and sent_texts(graph_api) == []

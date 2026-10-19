@@ -60,7 +60,7 @@ def test_handover_alert_reply_resolve(client: TestClient, router: respx.MockRout
     params = [p["text"] for p in alerts[0]["template"]["components"][0]["parameters"]]
     conv_id = run_sql(f"SELECT id FROM {TEST_SCHEMA}.conversations")[0]["id"]
     assert alerts[0]["template"]["name"] == "staff_alert" and alerts[0]["template"]["language"] == {"code": "en"}
-    assert params == ["Asha Rao", "+" + PHONE, "damaged item", f"https://mybill.test/?chat={conv_id}"]
+    assert params == ["Asha Rao", "+" + PHONE, "needs help – damaged item", f"https://mybill.test/?chat={conv_id}"]
 
     say(client, "Please help, I need it on Sunday")                                 # bot stays silent
     assert len(fake_llm.calls) == 2 and len(bodies(graph_api)) == 3
