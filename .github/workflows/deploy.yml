@@ -75,6 +75,7 @@ jobs:
             WA_ACCESS_TOKEN=WA_ACCESS_TOKEN:latest
             WA_APP_SECRET=WA_APP_SECRET:latest
             WA_VERIFY_TOKEN=WA_VERIFY_TOKEN:latest
+            IG_APP_SECRET=IG_APP_SECRET:latest
             DATABASE_URL=DATABASE_URL:latest
             ALLOWED_SENDERS=ALLOWED_SENDERS:latest
             ANTHROPIC_API_KEY=ANTHROPIC_API_KEY:latest

@@ -23,7 +23,8 @@ _SEVERITY = {
 
 # The GET handshake puts our verify token in the query string, and uvicorn's access
 # log prints full URLs. Mask it before anything is written.
-_VERIFY_TOKEN_RE = re.compile(r"(hub\.verify_token=)[^&\s\"]*")
+# Meta sends the token twice: hub.verify_token=... and hub_verify_token=...
+_VERIFY_TOKEN_RE = re.compile(r"(hub[._]verify_token=)[^&\s\"]*")
 
 
 class RedactSecretsFilter(logging.Filter):
