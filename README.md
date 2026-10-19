@@ -151,6 +151,19 @@ The worker's `WorkerMessenger` picks the adapter from `conversation.channel`.
 - **Token:** `IG_ACCESS_TOKEN` is read from Secret Manager at runtime and cached for 1 h. Locally, use the `IG_ACCESS_TOKEN` env var.
 - **Config:** `IG_ACCOUNT_ID` (srisa_fabrics: 17841463885925115).
 
+### Staff inbox ("Customer chats" in mybill-ui)
+
+When the AI hands a chat to the team (`request_human_help`, an LLM failure or an order problem), `needs_human_since` is stamped. Every handover except ones staff caused themselves triggers a staff alert (`app/staff_alerts.py`): an approved WhatsApp template `staff_alert` sent to `STAFF_ALERT_NUMBERS`, linking to `MYBILL_UI_URL/?chat=<id>`. Without numbers it's logged only (`STAFF_NEEDED`).
+
+Template to submit in WhatsApp Manager (Utility, English, 4 variables):
+`⚠️ Customer needs help: {{1}} ({{2}}). Reason: {{3}}. Open the chat: {{4}}`
+
+`app/staff_api.py` (`/staff/**`) is authenticated with a Google ID token of mybill-service's service account (or the admin key). mybill-service proxies it as `/api/boutique-chats`. Endpoints:
+- the list of waiting chats and a count,
+- one conversation with its messages,
+- `reply`: sent from the shop's account, recorded as `author='staff'`, bot stays off; refused with 409 `WINDOW_CLOSED` after 24 h,
+- `resolve` (AI on again) and `keep` (AI off).
+
 ### Tuning the prompt in your terminal
 
 ```bash

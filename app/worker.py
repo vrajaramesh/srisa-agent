@@ -13,7 +13,7 @@ from typing import Any
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app import channels, mybill_client
+from app import channels, mybill_client, staff_alerts
 from app import repositories as repo
 from app.agent import ad_entry, fep, ig_handoff, orders, resolution, tools
 from app.agent.runner import AgentResult, run_agent
@@ -30,7 +30,7 @@ logger = logging.getLogger(__name__)
 
 FALLBACK_REPLY = "Thank you! Our team will get back to you shortly 🙏"
 MAX_ATTEMPTS = 5  # matches the Cloud Tasks queue's max-attempts
-EVENT_TIMEOUT_SECONDS = 3  # marketing events are awaited at most this long, after the reply went out
+EVENT_TIMEOUT_SECONDS = 8  # background work (marketing events, staff alerts) is awaited at most this long
 
 # Taps applied by code before the model runs (then the model continues the conversation).
 SHORTCUTS = {"size": ("save_size", "size_code"), "fit": ("save_size", "fit_preference"),
@@ -49,9 +49,11 @@ class WorkerMessenger:
     """orders.Messenger over the conversation's channel (ChannelAdapter); every successful send is recorded as an
     outbound message in this transaction. The recipient is always the conversation's customer."""
 
-    def __init__(self, session: AsyncSession, conversation: Conversation, adapter: ChannelAdapter | None = None) -> None:
+    def __init__(self, session: AsyncSession, conversation: Conversation, adapter: ChannelAdapter | None = None,
+                 author: str = "bot") -> None:
         self._session, self._conversation = session, conversation
         self.adapter = adapter or channels.adapter_for(conversation.channel)
+        self.author = author
         self.error: str | None = None
         self.sent = 0  # messages successfully sent in this run
 
@@ -64,7 +66,7 @@ class WorkerMessenger:
             self.error = sent.error or "send failed"
             return False
         repo.add_outbound_message(self._session, self._conversation.id, text, sent.message_id,
-                                  {**(sent.data or {}), **(meta or {})}, message_type=message_type, author="bot")
+                                  {**(sent.data or {}), **(meta or {})}, message_type=message_type, author=self.author)
         self.sent += 1
         return True
 
@@ -185,6 +187,7 @@ async def _process(conversation_id: uuid.UUID, background: list[asyncio.Task]) -
         if conversation is None:
             logger.warning("Unknown conversation", extra={"fields": {"conversation_id": str(conversation_id)}})
             return result
+        was_needs_human = bool(conversation.needs_human)
         if conversation.channel == "instagram":
             await _decide_echoes(session, conversation)
         pending = await repo.pending_inbound(session, conversation_id, MAX_ATTEMPTS)
@@ -247,6 +250,8 @@ async def _process(conversation_id: uuid.UUID, background: list[asyncio.Task]) -
         if error:
             result.failed = True
             logger.error("Reply failed", extra={"fields": {"conversation_id": str(conversation_id), "error": error}})
+        if staff_alerts.should_alert(was_needs_human, conversation):
+            background.append(asyncio.create_task(staff_alerts.alert_staff(conversation)))
         else:
             result.processed = len(pending)
     return result

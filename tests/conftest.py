@@ -51,6 +51,7 @@ os.environ.update(
         "IG_ACCOUNT_ID": "17841400000000000",
         "IG_ACCESS_TOKEN": "test-ig-token",
         "ALLOWED_IG_SENDERS": "",
+        "PUBLIC_BASE_URL": "https://srisa.test",
     }
 )
 

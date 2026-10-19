@@ -244,14 +244,17 @@ def test_instagram_chat_then_order_on_whatsapp_link(client: TestClient, router: 
     sent = ig_sent(ig_api)
     assert sent[0] == {"recipient": {"id": CUSTOMER},
                        "message": {"text": "Hi Asha! 😊 Yes, we have kurtis stitched to your size. Which design do you like?"}}
-    template = sent[1]["message"]["attachment"]["payload"]
-    assert template["template_type"] == "button" and template["text"].startswith("To place your order, continue on WhatsApp")
-    button, = template["buttons"]
-    assert button["type"] == "web_url" and button["title"] == "Order on WhatsApp"
-    assert button["url"].startswith("https://wa.me/919491647691?text=Hi%20SRISA%21%20I%27d%20like%20to%20order%20KUR-101")
     ref = run_sql(f"SELECT code, ig_user_id, design_code, wa_id, expires_at FROM {TEST_SCHEMA}.ref_codes")[0]
     assert ref["ig_user_id"] == CUSTOMER and ref["design_code"] == "KUR-101" and ref["wa_id"] is None
-    assert ref["code"] in button["url"] and ref["expires_at"] > datetime.now(timezone.utc) + timedelta(days=6)
+    assert ref["expires_at"] > datetime.now(timezone.utc) + timedelta(days=6)
+    link_text = sent[1]["message"]["text"]
+    assert link_text.startswith("To order KUR-101, continue on WhatsApp 👇\nhttps://srisa.test/wa/" + ref["code"])
+    # The short link redirects to wa.me with the pre-typed order message.
+    resp = client.get(f"/wa/{ref['code'].lower()}", follow_redirects=False)
+    assert resp.status_code == 302
+    assert resp.headers["location"] == ("https://wa.me/919491647691?text=Hi%20SRISA%21%20I%27d%20like%20to%20order%20"
+                                        f"KUR-101%20%F0%9F%9B%8D%EF%B8%8F%20%28ref%20{ref['code']}%29")
+    assert client.get("/wa/nonsense", follow_redirects=False).headers["location"].startswith("https://wa.me/919491647691?text=Hi")
     assert sent[2]["message"] == {"text": "Tap the button and press Send in WhatsApp 😊"}
     # start_order was refused on Instagram (no draft, still browsing).
     assert run_sql(f"SELECT COUNT(*) AS n FROM {TEST_SCHEMA}.order_drafts")[0]["n"] == 0

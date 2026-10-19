@@ -172,6 +172,15 @@ async def send_list(to: str, body: str, button_text: str, sections: list[dict[st
     return await _post_messages(payload, action="send_list")
 
 
+async def send_template(to: str, name: str, language: str, body_params: list[str]) -> SendResult:
+    """An approved message template (allowed outside the 24h window, e.g. staff alerts)."""
+    payload = {"messaging_product": "whatsapp", "to": to, "type": "template", "template": {
+        "name": name, "language": {"code": language},
+        "components": [{"type": "body", "parameters": [{"type": "text", "text": clip(p, 1000) or "-"}
+                                                        for p in body_params]}]}}
+    return await _post_messages(payload, action="send_template")
+
+
 async def mark_as_read(message_id: str) -> SendResult:
     """Mark an incoming message as read (customer sees blue ticks)."""
     payload = {"messaging_product": "whatsapp", "status": "read", "message_id": message_id}

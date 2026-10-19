@@ -36,6 +36,8 @@ class AgentSettings(BaseSettings):
     brand_name: str = "SRISA Boutique"
     # The shop's WhatsApp number (digits) for the "Order on WhatsApp" link sent on Instagram.
     whatsapp_order_number: str = "919491647691"
+    # This service's public URL, for short links like {public_base_url}/wa/IG-7K3QA (empty = full wa.me links).
+    public_base_url: str = ""
 
     # mybill-service /api/agent/** (read-only catalog for the agent's tools).
     mybill_base_url: str = ""  # e.g. https://mybill-service-276371417285.us-central1.run.app
@@ -94,8 +96,19 @@ class Settings(DatabaseSettings, AgentSettings):
     # (mybill-service's runtime service account) and audience TASKS_TARGET_URL (this service's URL).
     mybill_events_sa_email: str = "276371417285-compute@developer.gserviceaccount.com"
 
+    # Staff alerts when a chat is handed to the team: WhatsApp template to these numbers (comma-separated,
+    # digits with country code). Empty = no alerts. The template must be approved in WhatsApp Manager.
+    staff_alert_numbers: str = ""
+    staff_alert_template: str = "staff_alert"
+    staff_alert_template_lang: str = "en"
+    mybill_ui_url: str = ""  # link in the alert: {mybill_ui_url}/?chat=<conversation id>
+
     admin_api_key: SecretStr | None = None
     admin_allowed_emails: str = ""
+
+    @property
+    def staff_alert_number_list(self) -> list[str]:
+        return [n.strip().lstrip("+").replace(" ", "") for n in self.staff_alert_numbers.split(",") if n.strip()]
 
     @property
     def allowed_ig_sender_set(self) -> frozenset[str]:

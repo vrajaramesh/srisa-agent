@@ -1,7 +1,7 @@
 """ORM models for the `agent` schema. Alembic migrations are the source of truth for DDL."""
 
 import uuid
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any
 
 from sqlalchemy import (
@@ -21,6 +21,7 @@ from sqlalchemy import (
     text as sql_text,
 )
 from sqlalchemy.dialects.postgresql import ARRAY, JSONB, UUID
+from sqlalchemy import event
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 SCHEMA = "agent"
@@ -58,6 +59,8 @@ class Conversation(Base):
     mybill_customer_id: Mapped[int | None] = mapped_column(Integer)
     # Why the bot handed over (e.g. "ready_to_order", "llm_failure: timeout"). Cleared on resume.
     needs_human_reason: Mapped[str | None] = mapped_column(Text)
+    # When it was handed to the team (set/cleared automatically when needs_human changes; staff inbox order).
+    needs_human_since: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     last_customer_message_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     # Newest Click-to-WhatsApp ad / post referral (history in conversation_entries). source_type "ad" | "post".
     entry_source_type: Mapped[str | None] = mapped_column(Text)
@@ -271,3 +274,12 @@ class InstagramEcho(Base):
     received_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     decided_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     decision: Mapped[str | None] = mapped_column(Text)
+
+
+@event.listens_for(Conversation.needs_human, "set")
+def _track_handover(target: Conversation, value: bool, oldvalue: Any, initiator: Any) -> None:
+    """needs_human False -> True stamps needs_human_since; True -> False clears it."""
+    if value and oldvalue is not True:
+        target.needs_human_since = datetime.now(timezone.utc)
+    elif not value:
+        target.needs_human_since = None
