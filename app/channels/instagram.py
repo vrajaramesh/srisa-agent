@@ -12,6 +12,7 @@ Echoes (is_echo) are messages the business account sent - by us, or by staff in 
 import logging
 import re
 import time
+from dataclasses import dataclass, field
 from typing import Any
 
 import httpx
@@ -103,6 +104,38 @@ def parse_webhook(payload: dict[str, Any]) -> list[NormalizedInbound]:
         for event in (entry or {}).get("messaging") or []:
             if isinstance(event, dict) and (parsed := _parse_event(event)) is not None:
                 out.append(parsed)
+    return out
+
+
+@dataclass(frozen=True)
+class Comment:
+    """A comment on one of our posts/reels (webhook field "comments")."""
+
+    comment_id: str
+    media_id: str | None
+    from_id: str | None
+    username: str | None
+    text: str | None
+    parent_id: str | None   # set when it is a reply to another comment
+    raw: dict[str, Any] = field(default_factory=dict, compare=False, repr=False)
+
+
+def parse_comments(payload: dict[str, Any]) -> list[Comment]:
+    """entry[].changes[] with field "comments" -> Comment (other change fields are ignored)."""
+    if not isinstance(payload, dict) or payload.get("object") != "instagram":
+        return []
+    out = []
+    for entry in payload.get("entry") or []:
+        for change in (entry or {}).get("changes") or []:
+            if not isinstance(change, dict) or change.get("field") != "comments":
+                continue
+            value = change.get("value") or {}
+            if not value.get("id"):
+                continue
+            sender = value.get("from") or {}
+            out.append(Comment(comment_id=str(value["id"]), media_id=(value.get("media") or {}).get("id"),
+                               from_id=sender.get("id"), username=sender.get("username"), text=value.get("text"),
+                               parent_id=value.get("parent_id"), raw=value))
     return out
 
 
@@ -236,6 +269,41 @@ async def fetch_profile(igsid: str) -> dict[str, Any] | None:
     return {"name": data.get("name"), "username": data.get("username")}
 
 
+async def fetch_media(media_id: str) -> dict[str, Any] | None:
+    """{caption, permalink} of one of our posts/reels, or None (never raises)."""
+    settings = get_settings()
+    token = await ig_token.get_token()
+    if not token:
+        return None
+    try:
+        resp = await _get_client().get(f"https://graph.instagram.com/{settings.graph_api_version}/{media_id}",
+                                       params={"fields": "caption,permalink"}, headers={"Authorization": f"Bearer {token}"})
+    except httpx.HTTPError as exc:
+        logger.warning("Instagram media lookup failed", extra={"fields": {"error": repr(exc)[:200]}})
+        return None
+    return resp.json() if resp.is_success else None
+
+
+async def reply_to_comment(comment_id: str, text: str) -> SendResult:
+    """Public reply under a comment (links in comments aren't clickable, so keep it short)."""
+    settings = get_settings()
+    token = await ig_token.get_token()
+    if not token:
+        return SendResult(ok=False, error="instagram token unavailable")
+    try:
+        resp = await _get_client().post(f"https://graph.instagram.com/{settings.graph_api_version}/{comment_id}/replies",
+                                        data={"message": text}, headers={"Authorization": f"Bearer {token}"})
+    except httpx.HTTPError as exc:
+        return SendResult(ok=False, error=repr(exc)[:200])
+    data = resp.json() if resp.content else {}
+    if resp.is_success:
+        return SendResult(ok=True, message_id=data.get("id"), status_code=resp.status_code, data=data)
+    err = data.get("error") or {}
+    logger.error("Instagram comment reply failed", extra={"fields": {"status_code": resp.status_code,
+                                                                     "error_message": err.get("message")}})
+    return SendResult(ok=False, status_code=resp.status_code, error=f"{err.get('code')}: {err.get('message')}")
+
+
 class InstagramAdapter(ChannelAdapter):
     name = "instagram"
     image_captions = False
@@ -320,3 +388,8 @@ class InstagramAdapter(ChannelAdapter):
 
     async def mark_seen(self, to: str, message_id: str | None) -> SendResult:
         return await self._post({"recipient": {"id": to}, "sender_action": "mark_seen"}, "mark_seen")
+
+    async def send_private_reply(self, comment_id: str, text: str) -> SendResult:
+        """Private reply: a DM to the person who wrote the comment (one per comment, within 7 days)."""
+        return await self._post({"recipient": {"comment_id": comment_id},
+                                 "message": {"text": _clip_bytes(text, MAX_TEXT_BYTES)}}, "private_reply")

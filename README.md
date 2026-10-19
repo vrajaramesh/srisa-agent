@@ -151,6 +151,15 @@ The worker's `WorkerMessenger` picks the adapter from `conversation.channel`.
 - **Token:** `IG_ACCESS_TOKEN` is read from Secret Manager at runtime and cached for 1 h. Locally, use the `IG_ACCESS_TOKEN` env var.
 - **Config:** `IG_ACCOUNT_ID` (srisa_fabrics: 17841463885925115).
 
+### Instagram comments → WhatsApp order link
+
+`app/ig_comments.py`. A comment on one of our posts or reels (webhook field `comments`) is stored in `agent.instagram_comments` (Alembic 0010) and processed via the `/tasks/process-comment` Cloud Task.
+- **Only buying comments get a reply:** price / order / want / size / details / entha / kitna / ధర / a question mark / a design code.
+- **The design** comes from the post's mybill IG_MEDIA link, else `Code: …` in the caption, else a code in the comment.
+- **The private reply** (a DM, recipient `comment_id`) contains the design, price, stitching time and a clickable wa.me link with "I'd like to order KUR-101 (ref IG-…)". It's recorded as an outbound message under the conversation lock, so its echo counts as ours.
+- **The public reply** is "Thank you 💜 We've sent you the details in a DM. Or WhatsApp us … with code KUR-101".
+- **Skipped:** our own comments, other senders while `ALLOWED_IG_SENDERS` is set, and repeats from the same person on the same post within 24 h. Redelivered comments are deduplicated by comment id.
+
 ### Staff inbox ("Customer chats" in mybill-ui)
 
 When the AI hands a chat to the team (`request_human_help`, an LLM failure or an order problem), `needs_human_since` is stamped. Every handover except ones staff caused themselves triggers a staff alert (`app/staff_alerts.py`): an approved WhatsApp template `staff_alert` sent to `STAFF_ALERT_NUMBERS`, linking to `MYBILL_UI_URL/?chat=<id>`. Without numbers it's logged only (`STAFF_NEEDED`).

@@ -19,7 +19,8 @@ from app import repositories as repo
 from app.config import get_settings
 from app.db import dispose_db, get_sessionmaker, init_db
 from app.logging_setup import setup_logging
-from app.models import RECEIVED, SKIPPED, Conversation, RawWebhook
+from app.models import RECEIVED, SKIPPED, Conversation, InstagramComment, RawWebhook
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 from app.security import tokens_match, verify_admin, verify_signature, verify_tasks_token
 from app.webhook_parser import IncomingMessage, ParsedWebhook, parse_webhook
 
@@ -169,12 +170,13 @@ async def receive_instagram_webhook(request: Request, background: BackgroundTask
         logger.warning("Rejected Instagram webhook: body is not valid JSON")
         return Response(status_code=400)
     try:
-        conversation_ids, echo_conversation_ids = await store_instagram_webhook(payload)
+        conversation_ids, echo_conversation_ids, comment_ids = await store_instagram_webhook(payload)
     except (SQLAlchemyError, OSError):
         logger.exception("Failed to store Instagram webhook")
         return Response(status_code=500)
     await queue.enqueue(conversation_ids, background)
     await queue.enqueue(echo_conversation_ids, background, delay_seconds=ECHO_DELAY_SECONDS)
+    await queue.enqueue_comments(comment_ids, background)
     entries = payload.get("entry") or [] if isinstance(payload, dict) else []
     logger.info("Instagram webhook stored", extra={"fields": {
         "object": payload.get("object") if isinstance(payload, dict) else None,
@@ -183,15 +185,25 @@ async def receive_instagram_webhook(request: Request, background: BackgroundTask
     return Response(status_code=200)
 
 
-async def store_instagram_webhook(payload: dict) -> tuple[list[uuid.UUID], list[uuid.UUID]]:
-    """Save the raw body, customer messages and echoes in one transaction.
-    Returns (conversations with new customer messages, conversations with new echoes)."""
+async def store_instagram_webhook(payload: dict) -> tuple[list[uuid.UUID], list[uuid.UUID], list[str]]:
+    """Save the raw body, customer messages, echoes and comments in one transaction.
+    Returns (conversations with new customer messages, conversations with new echoes, new comment ids)."""
     allowed = get_settings().allowed_ig_sender_set
     to_process: list[uuid.UUID] = []
     echoes: list[uuid.UUID] = []
+    comments: list[str] = []
     async with get_sessionmaker()() as session, session.begin():
         if get_settings().ig_capture_raw:
             session.add(RawWebhook(channel=IG_CHANNEL, payload=payload))
+        for comment in instagram.parse_comments(payload):
+            inserted = (await session.execute(
+                pg_insert(InstagramComment).values(comment_id=comment.comment_id, media_id=comment.media_id,
+                                                   from_id=comment.from_id, username=comment.username,
+                                                   text=comment.text, raw=comment.raw)
+                .on_conflict_do_nothing(index_elements=["comment_id"]).returning(InstagramComment.comment_id)
+            )).scalar_one_or_none()
+            if inserted:
+                comments.append(inserted)
         for msg in instagram.parse_webhook(payload):
             if msg.is_echo:
                 conversation_id = await repo.upsert_conversation_for(session, IG_CHANNEL, msg.external_user_id, None, None)
@@ -212,7 +224,7 @@ async def store_instagram_webhook(payload: dict) -> tuple[list[uuid.UUID], list[
                 "allowed": is_allowed}})
             if is_allowed and conversation_id not in to_process:
                 to_process.append(conversation_id)
-    return to_process, echoes
+    return to_process, echoes, comments
 
 
 def _instagram_time(seconds: str | None) -> datetime:
@@ -302,6 +314,24 @@ async def process_message_task(request: Request, task: ProcessMessageTask) -> Re
         {"processed": result.processed, "failed": result.failed},
         status_code=500 if result.failed else 200,
     )
+
+
+class ProcessCommentTask(BaseModel):
+    comment_id: str
+
+
+@app.post(queue.COMMENT_TASK_PATH)
+async def process_comment_task(request: Request, task: ProcessCommentTask) -> Response:
+    """Cloud Tasks worker: auto-reply to one Instagram comment (500 -> retried)."""
+    settings = get_settings()
+    if settings.use_cloud_tasks:
+        authorized = await run_in_threadpool(verify_tasks_token, request.headers.get("Authorization"),
+                                             settings.tasks_target_url.rstrip("/"), settings.tasks_service_account)
+        if not authorized:
+            return Response(status_code=403)
+    from app import ig_comments
+    outcome = await ig_comments.process_comment(task.comment_id)
+    return JSONResponse({"outcome": outcome}, status_code=500 if outcome == ig_comments.FAILED else 200)
 
 
 @app.post("/admin/conversations/{conversation_id}/resume")
