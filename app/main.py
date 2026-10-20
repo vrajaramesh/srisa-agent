@@ -215,13 +215,15 @@ def _instagram_time(seconds: str | None) -> datetime:
 async def store_webhook(parsed: ParsedWebhook) -> list[uuid.UUID]:
     """Save messages and receipts in one transaction. Returns conversations needing work."""
     allowed = get_settings().allowed_sender_set
+    staff = set(get_settings().staff_alert_number_list)
     to_process: list[uuid.UUID] = []
     async with get_sessionmaker()() as session, session.begin():
         for msg in parsed.messages:
             conversation_id = await repo.upsert_conversation(session, CHANNEL, msg)
             # Stored as "skipped" (never answered) so clearing ALLOWED_SENDERS later
-            # doesn't make the bot reply to old messages.
-            is_allowed = not allowed or msg.from_ in allowed
+            # doesn't make the bot reply to old messages. Staff phones (alert numbers) never get bot replies:
+            # they message the shop only to keep the 24 h window open for alerts.
+            is_allowed = (not allowed or msg.from_ in allowed) and msg.from_ not in staff
             stored = await repo.insert_inbound_message(
                 session, conversation_id, msg, RECEIVED if is_allowed else SKIPPED
             )

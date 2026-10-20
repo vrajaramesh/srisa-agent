@@ -84,6 +84,10 @@ def _templates(route: respx.Route) -> list[dict]:
     return [b for b in (json.loads(c.request.content) for c in route.calls) if b.get("type") == "template"]
 
 
+def _alerts(route: respx.Route, number: str = "919441200001") -> list[dict]:
+    return [b for b in (json.loads(c.request.content) for c in route.calls) if b.get("to") == number]
+
+
 def test_paid_order_needing_exact_measurements_tells_customer_and_alerts_staff(
         client: TestClient, graph_api: respx.Route, authorized, monkeypatch) -> None:
     from app.config import get_settings
@@ -92,16 +96,14 @@ def test_paid_order_needing_exact_measurements_tells_customer_and_alerts_staff(
     get_settings.cache_clear()
     _conversation()
     assert _post(client, MEASURE).json() == {"status": "sent"}
-    assert sent_texts(graph_api)[-1].endswith(
+    assert _alerts(graph_api, "919876543210")[-1]["text"]["body"].endswith(
         "\n📏 Our tailor will call you on +919876543210 shortly to take your exact measurements.")
-    alert, = _templates(graph_api)
-    assert alert["to"] == "919441200001" and alert["template"]["name"] == "staff_alert"
-    params = [p["text"] for p in alert["template"]["components"][0]["parameters"]]
-    assert params == ["Asha Rao", "+919876543210",
-                      "📏 call for exact measurements – order SB-1001 (BLO-12 Designer Blouse), paid ₹2,149",
-                      "https://mybill.test/?order=SB-1001"]
+    alert, = _alerts(graph_api)
+    assert alert["type"] == "text"                               # free text first (staff messaged the shop)
+    assert "Action needed: 📏 call for exact measurements – order SB-1001 (BLO-12 Designer Blouse), paid ₹2,149" \
+        in alert["text"]["body"] and alert["text"]["body"].endswith("https://mybill.test/?order=SB-1001")
     assert _post(client, MEASURE).json() == {"status": "duplicate"}
-    assert len(_templates(graph_api)) == 1                      # alerted once
+    assert len(_alerts(graph_api)) == 1                          # alerted once
 
 
 def test_measurement_alert_even_without_a_whatsapp_chat(client: TestClient, graph_api: respx.Route, authorized,
@@ -110,4 +112,24 @@ def test_measurement_alert_even_without_a_whatsapp_chat(client: TestClient, grap
     monkeypatch.setenv("STAFF_ALERT_NUMBERS", "919441200001")
     get_settings.cache_clear()
     assert _post(client, {**MEASURE, "event_id": "evt_m2"}).json() == {"status": "unknown_customer"}
-    assert len(_templates(graph_api)) == 1 and sent_texts(graph_api) == []
+    assert len(_alerts(graph_api)) == 1 and [b for b in _alerts(graph_api, "919876543210")] == []
+
+
+def test_alert_falls_back_to_template_outside_24h(client: TestClient, router: respx.MockRouter, authorized,
+                                                 monkeypatch) -> None:
+    from app.config import get_settings
+    monkeypatch.setenv("STAFF_ALERT_NUMBERS", "919441200001")
+    get_settings.cache_clear()
+
+    def graph(request):
+        body = json.loads(request.content)
+        if body.get("to") == "919441200001" and body.get("type") == "text":   # staff hasn't messaged in 24 h
+            return Response(400, json={"error": {"code": 131047, "message": "Re-engagement message"}})
+        return Response(200, json={"messages": [{"id": "wamid.x"}]})
+
+    route = router.post(MESSAGES_URL).mock(side_effect=graph)
+    assert _post(client, {**MEASURE, "event_id": "evt_m3"}).json() == {"status": "unknown_customer"}
+    kinds = [b["type"] for b in _alerts(route)]
+    assert kinds == ["text", "template"]
+    tpl = _alerts(route)[1]["template"]
+    assert tpl["name"] == "staff_alert" and [p["text"] for p in tpl["components"][0]["parameters"]][2].startswith("📏 call")

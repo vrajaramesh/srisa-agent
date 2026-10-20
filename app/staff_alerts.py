@@ -56,19 +56,33 @@ async def alert_measurement_call(order_no: str, name: str | None, phone: str | N
     return await send_alert(name or "Customer", phone or "-", reason, link)
 
 
+def alert_text(name: str, contact: str, reason: str, link: str) -> str:
+    return (f"🔔 SRISA staff alert\n\nCustomer: {name}\nContact: {contact}\nAction needed: {reason}\n\n"
+            f"Please follow up with the customer and update the order in mybill: {link}")
+
+
 async def send_alert(name: str, contact: str, reason: str, link: str) -> int:
+    """To every STAFF_ALERT_NUMBERS: a normal text first (free, delivered at once if that staff phone messaged the
+    shop number in the last 24 h), else the approved "staff_alert" template. Returns how many were delivered."""
     settings = get_settings()
-    numbers = settings.staff_alert_number_list
     sent = 0
-    for number in numbers:
+    for number in settings.staff_alert_number_list:
         try:
-            result = await whatsapp_client.send_template(number, settings.staff_alert_template,
-                                                         settings.staff_alert_template_lang, [name, contact, reason, link])
+            result = await whatsapp_client.send_text(number, alert_text(name, contact, reason, link))
+            how = "text"
+            if not result.ok:
+                result = await whatsapp_client.send_template(number, settings.staff_alert_template,
+                                                             settings.staff_alert_template_lang,
+                                                             [name, contact, reason, link])
+                how = "template"
         except Exception as exc:  # noqa: BLE001
-            logger.error("Staff alert failed", extra={"fields": {"error": repr(exc)[:200]}})
+            logger.error("STAFF_ALERT_UNDELIVERED", extra={"fields": {"error": repr(exc)[:200]}})
             continue
         if result.ok:
             sent += 1
+            logger.info("Staff alert sent", extra={"fields": {"via": how}})
         else:
-            logger.error("Staff alert rejected", extra={"fields": {"error": result.error}})
+            # Neither: the staff phone hasn't messaged the shop in 24 h and the template isn't approved yet.
+            logger.error("STAFF_ALERT_UNDELIVERED", extra={"fields": {"error": result.error,
+                         "hint": "staff phone should message the shop number, or wait for template approval"}})
     return sent

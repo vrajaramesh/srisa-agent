@@ -55,12 +55,12 @@ def test_handover_alert_reply_resolve(client: TestClient, router: respx.MockRout
 
     sent = bodies(graph_api)
     assert sent[0]["type"] == "text" and sent[0]["to"] == PHONE                    # the bot tells her
-    alerts = [b for b in sent if b["type"] == "template"]
-    assert [a["to"] for a in alerts] == ["919441200001", "919441200002"]
-    params = [p["text"] for p in alerts[0]["template"]["components"][0]["parameters"]]
+    alerts = [b for b in sent if b["to"] in ("919441200001", "919441200002")]
+    assert [a["to"] for a in alerts] == ["919441200001", "919441200002"] and alerts[0]["type"] == "text"
     conv_id = run_sql(f"SELECT id FROM {TEST_SCHEMA}.conversations")[0]["id"]
-    assert alerts[0]["template"]["name"] == "staff_alert" and alerts[0]["template"]["language"] == {"code": "en"}
-    assert params == ["Asha Rao", "+" + PHONE, "needs help – damaged item", f"https://mybill.test/?chat={conv_id}"]
+    assert alerts[0]["text"]["body"] == ("🔔 SRISA staff alert\n\nCustomer: Asha Rao\nContact: +" + PHONE +
+                                        "\nAction needed: needs help – damaged item\n\nPlease follow up with the "
+                                        f"customer and update the order in mybill: https://mybill.test/?chat={conv_id}")
 
     say(client, "Please help, I need it on Sunday")                                 # bot stays silent
     assert len(fake_llm.calls) == 2 and len(bodies(graph_api)) == 3
@@ -121,3 +121,11 @@ def test_no_alert_numbers_means_no_template(client: TestClient, router: respx.Mo
     say(client, "I want to talk to a person")
     assert not [b for b in bodies(graph_api) if b["type"] == "template"]
     assert run_sql(f"SELECT needs_human_since IS NOT NULL AS stamped FROM {TEST_SCHEMA}.conversations")[0]["stamped"]
+
+
+def test_staff_phone_never_gets_bot_replies(client: TestClient, graph_api: respx.Route, fake_llm, monkeypatch) -> None:
+    monkeypatch.setenv("STAFF_ALERT_NUMBERS", PHONE)   # this sender is a staff phone
+    get_settings.cache_clear()
+    say(client, "Hi")                                   # sent only to keep the alert window open
+    assert fake_llm.calls == [] and bodies(graph_api) == []
+    assert run_sql(f"SELECT status FROM {TEST_SCHEMA}.messages")[0]["status"] == "skipped"
