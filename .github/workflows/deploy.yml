@@ -72,7 +72,6 @@ jobs:
             MYBILL_AUTH=google
             ADMIN_ALLOWED_EMAILS=srisafabricshyd@gmail.com
             IG_ACCOUNT_ID=17841463885925115
-            ALLOWED_IG_SENDERS=1634552674698294
             MYBILL_UI_URL=https://mybill-ui-6rjdx4lmcq-uc.a.run.app
             STAFF_ALERT_NUMBERS=918008152007
           secrets: |
@@ -81,7 +80,6 @@ jobs:
             WA_VERIFY_TOKEN=WA_VERIFY_TOKEN:latest
             IG_APP_SECRET=IG_APP_SECRET:latest
             DATABASE_URL=DATABASE_URL:latest
-            ALLOWED_SENDERS=ALLOWED_SENDERS:latest
             ANTHROPIC_API_KEY=ANTHROPIC_API_KEY:latest
             ADMIN_API_KEY=ADMIN_API_KEY:latest
           flags: >
