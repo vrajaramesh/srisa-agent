@@ -19,7 +19,7 @@ from app.webhook_parser import Referral, parse_referral
 logger = logging.getLogger(__name__)
 
 FRESH_START_GAP = timedelta(days=7)
-BUTTON_PROMPT = "Would you like to order this one?"
+BUTTON_PROMPT = "Would you like to order this one, see more photos, or check the size guide? 👇"
 # Meta's default ad message ("Hello! Can I get more info on this?"). Some ad taps arrive without a referral;
 # this text still tells us she came from an ad, so we assume the ad that brought the latest chats.
 AD_GREETING = re.compile(r"^\s*(hello|hi)?[!,.\s]*can i (get|have) more info(rmation)? (on|about) this\s*[?.!]*\s*$",
@@ -81,15 +81,48 @@ def _first_name(name: str | None) -> str:
     return (name or "").strip().split(" ")[0]
 
 
-def caption(design: dict[str, Any]) -> str:
+MAX_DESCRIPTION = 600
+
+
+def _description(design: dict[str, Any]) -> str:
+    """The design's description from mybill, tidied (paragraphs kept), clipped at a sentence/word boundary."""
+    text = "\n".join(line.strip() for line in (design.get("description") or "").strip().splitlines())
+    text = re.sub(r"\n{3,}", "\n\n", text)
+    if len(text) <= MAX_DESCRIPTION:
+        return text
+    cut = text[:MAX_DESCRIPTION]
+    end = max(cut.rfind(". "), cut.rfind("\n"))
+    return (cut[:end + 1] if end > MAX_DESCRIPTION // 2 else cut.rsplit(" ", 1)[0] + "…").strip()
+
+
+def caption(design: dict[str, Any], sizes: str | None = None, fabric_price: str | None = None) -> str:
+    """The product card: what it is (description), price, stitching time, sizes, fabric-only price."""
     lead = design.get("lead_time_days")
-    stitched = f" · stitched to your size in {lead} days 🧵" if lead else " · stitched to your size 🧵"
-    return f"{design['name']} – {format_rupees(design.get('base_price'))}{stitched}"
+    description = _description(design)
+    lines = [f"*{design['name']} ({design['code']})*"]
+    if description:
+        lines += ["", description, ""]
+    lines.append(f"💰 {format_rupees(design.get('base_price'))} – stitched to your size")
+    lines.append(f"🧵 Ready in {lead} days, then shipped across India" if lead else "🧵 Shipped across India")
+    if sizes:
+        lines.append(f"📏 Sizes {sizes}, or a custom size")
+    if fabric_price:
+        lines.append(f"✂️ Fabric alone also available – {fabric_price}")
+    return "\n".join(lines)
 
 
 def greeting(conversation: Conversation) -> str:
     first = _first_name(conversation.customer_name)
-    return f"Hi {first}! 👋 Thanks for checking out this design." if first else "Hi! 👋 Thanks for checking out this design."
+    return f"Hi {first}! 👋 Here are the details 👇" if first else "Hi! 👋 Here are the details 👇"
+
+
+async def _size_range(ctx: tools.ToolContext) -> str | None:
+    """"XS–4XL" from mybill's size chart (None if it can't be read)."""
+    try:
+        codes = [row["size_code"] for row in await ctx.chart()]
+    except Exception:  # noqa: BLE001 - the card is still useful without sizes
+        return None
+    return f"{codes[0]}–{codes[-1]}" if len(codes) > 1 else (codes[0] if codes else None)
 
 
 def buttons(code: str) -> list[dict[str, str]]:
@@ -100,9 +133,8 @@ def buttons(code: str) -> list[dict[str, str]]:
 
 async def send_first_reply(ctx: tools.ToolContext, referral: Referral, design: dict[str, Any]) -> bool:
     """Photo + caption, then the buttons. False if WhatsApp failed (the worker retries)."""
-    text = caption(design)
-    if not referral.welcome_text:
-        text = f"{greeting(ctx.conversation)}\n{text}"
+    text = caption(design, await _size_range(ctx), tools.fabric_price_text(tools.design_fabrics(design)) or None)
+    text = f"{greeting(ctx.conversation)}\n\n{text}"
     images = design.get("images") or []
     if images:
         if not await ctx.messenger.send_image(images[0]["url"], text):
