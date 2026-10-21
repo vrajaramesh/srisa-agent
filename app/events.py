@@ -14,7 +14,8 @@ from sqlalchemy import select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from app import repositories as repo
-from app import staff_alerts
+from app import staff_alerts, whatsapp_client
+from app.config import get_settings
 from app.agent.formatting import format_rupees
 from app.db import get_sessionmaker
 from app.models import Conversation, ProcessedEvent
@@ -35,6 +36,10 @@ class PaymentEvent(BaseModel):
     design_code: str | None = None
     design_name: str | None = None
     order_type: str | None = None   # GARMENT or FABRIC
+    # Website (srisafabrics.com) events: "ecom.order.paid" (alert staff), "ecom.reset_code" (send code).
+    items: str | None = None
+    delivery_address: str | None = None
+    code: str | None = None
 
 
 def _first_name(name: str | None) -> str:
@@ -69,9 +74,44 @@ def message_for(event: PaymentEvent) -> str | None:
     return None
 
 
+WEBSITE_ORDER_PAID, RESET_CODE = "ecom.order.paid", "ecom.reset_code"
+WEBSITE_EVENTS = (WEBSITE_ORDER_PAID, RESET_CODE)
+
+
+async def _first_time(event: PaymentEvent) -> bool:
+    async with get_sessionmaker()() as session, session.begin():
+        return (await session.execute(
+            pg_insert(ProcessedEvent).values(event_id=event.event_id, event_type=event.event, order_no=event.order_no)
+            .on_conflict_do_nothing(index_elements=["event_id"]).returning(ProcessedEvent.event_id)
+        )).scalar_one_or_none() is not None
+
+
+async def _handle_website(event: PaymentEvent) -> dict[str, Any]:
+    """Website events. A reset code goes to the customer as the AUTHENTICATION template (never logged);
+    a paid website order alerts the staff to pack and dispatch it."""
+    if event.event == RESET_CODE:
+        wa_id = "".join(ch for ch in (event.customer_phone or "") if ch.isdigit())
+        if not wa_id or not (event.code or "").isdigit():
+            return {"status": "invalid"}
+        settings = get_settings()
+        result = await whatsapp_client.send_auth_code(wa_id, settings.reset_code_template,
+                                                      settings.reset_code_template_lang, event.code)
+        if not result.ok:
+            raise RuntimeError(f"reset code not sent: {result.error}")
+        logger.info("RESET_CODE_SENT", extra={"fields": {"event_id": event.event_id}})
+        return {"status": "sent"}
+    if not await _first_time(event):
+        return {"status": "duplicate"}
+    sent = await staff_alerts.alert_website_order(event.order_no, event.customer_name, event.customer_phone,
+                                                  event.amount, event.items, event.delivery_address)
+    return {"status": "alerted", "staff_alerts_sent": sent}
+
+
 async def handle(event: PaymentEvent) -> dict[str, Any]:
     """Send the message once. Returns {"status": ...}; raises RuntimeError if WhatsApp failed (-> 500, mybill retries).
     A paid order that needs exact measurements also alerts the staff (once, after the event is recorded)."""
+    if event.event in WEBSITE_EVENTS:
+        return await _handle_website(event)
     text = message_for(event)
     if text is None:
         return {"status": "ignored_event_type"}

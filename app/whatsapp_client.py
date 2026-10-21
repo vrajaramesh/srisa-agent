@@ -181,6 +181,16 @@ async def send_template(to: str, name: str, language: str, body_params: list[str
     return await _post_messages(payload, action="send_template")
 
 
+async def send_auth_code(to: str, name: str, language: str, code: str) -> SendResult:
+    """An approved AUTHENTICATION template (one-time code + "Copy code" button)."""
+    payload = {"messaging_product": "whatsapp", "to": to, "type": "template", "template": {
+        "name": name, "language": {"code": language},
+        "components": [{"type": "body", "parameters": [{"type": "text", "text": code}]},
+                       {"type": "button", "sub_type": "url", "index": "0",
+                        "parameters": [{"type": "text", "text": code}]}]}}
+    return await _post_messages(payload, action="send_auth_code")
+
+
 async def mark_as_read(message_id: str) -> SendResult:
     """Mark an incoming message as read (customer sees blue ticks)."""
     payload = {"messaging_product": "whatsapp", "status": "read", "message_id": message_id}

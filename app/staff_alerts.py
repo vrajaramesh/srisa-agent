@@ -56,6 +56,19 @@ async def alert_measurement_call(order_no: str, name: str | None, phone: str | N
     return await send_alert(name or "Customer", phone or "-", reason, link)
 
 
+async def alert_website_order(order_no: str, name: str | None, phone: str | None, amount: float | None,
+                              items: str | None, address: str | None) -> int:
+    """A website (srisafabrics.com) order was paid: pack and dispatch it."""
+    settings = get_settings()
+    paid = f" – paid ₹{amount:,.0f}" if amount is not None else ""
+    reason = (f"🛍️ pack & dispatch website order {order_no}{paid}" + (f"\nItems: {items}" if items else "")
+              + (f"\nShip to: {address}" if address else ""))
+    link = (f"{settings.mybill_ui_url.rstrip('/')}/?view=online-orders" if settings.mybill_ui_url
+            else "mybill-ui > Online Orders")
+    logger.warning("WEBSITE_ORDER_PAID", extra={"fields": {"order_no": order_no}})
+    return await send_alert(name or "Customer", phone or "-", reason, link)
+
+
 def alert_text(name: str, contact: str, reason: str, link: str) -> str:
     return (f"🔔 SRISA staff alert\n\nCustomer: {name}\nContact: {contact}\nAction needed: {reason}\n\n"
             f"Please follow up with the customer and update the order in mybill: {link}")

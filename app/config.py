@@ -102,6 +102,9 @@ class Settings(DatabaseSettings, AgentSettings):
     staff_alert_numbers: str = ""
     staff_alert_template: str = "staff_alert"
     staff_alert_template_lang: str = "en"
+    # AUTHENTICATION template for website password-reset codes (srisafabrics.com "Forgot password").
+    reset_code_template: str = "srisa_reset_code"
+    reset_code_template_lang: str = "en"
     mybill_ui_url: str = ""  # link in the alert: {mybill_ui_url}/?chat=<conversation id>
 
     admin_api_key: SecretStr | None = None
