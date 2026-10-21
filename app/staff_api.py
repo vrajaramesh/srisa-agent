@@ -54,7 +54,7 @@ def _summary(c: Conversation, last: Message | None, waiting: int) -> dict[str, A
         "reply_window_open": _window_open(c), "waiting_messages": waiting,
         "last_message": None if last is None else {"direction": last.direction, "author": last.author,
                                                     "text": (last.text or f"[{last.type}]")[:160],
-                                                    "at": last.created_at},
+                                                    "status": last.status, "at": last.created_at},
     }
 
 
