@@ -6,7 +6,7 @@ an ADMIN_ALLOWED_EMAILS token for manual use.
 
 import logging
 import uuid
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from typing import Any
 
 from fastapi import APIRouter, HTTPException, Query, Request, Response
@@ -15,10 +15,10 @@ from pydantic import BaseModel, Field
 from sqlalchemy import and_, func, select
 
 from app import repositories as repo
-from app import whatsapp_client
+from app import insights, whatsapp_client
 from app.config import get_settings
 from app.db import get_sessionmaker
-from app.models import INBOUND, Conversation, Message
+from app.models import INBOUND, Conversation, DailyReport, Message
 from app.security import verify_admin, verify_tasks_token
 from app.worker import WorkerMessenger
 
@@ -145,6 +145,37 @@ def _display_text(m: Message) -> str | None:
 def _media_kind(m: Message) -> str | None:
     """'image' / 'video' / ... when a customer's WhatsApp media can be fetched via /staff/media/{message_id}."""
     return m.type if _whatsapp_media_id(m) else None
+
+
+@router.get("/reports")
+async def list_reports(request: Request, limit: int = Query(60, ge=1, le=365)) -> list[dict[str, Any]]:
+    """Daily AI reports, newest first: date, headline, key numbers."""
+    await _authorize(request)
+    async with get_sessionmaker()() as session:
+        rows = (await session.execute(select(DailyReport).order_by(DailyReport.report_date.desc()).limit(limit))).scalars().all()
+    return [{"date": r.report_date.isoformat(), "headline": (r.analysis or {}).get("headline"), "error": r.error,
+             "chats": ((r.metrics or {}).get("chats") or {}).get("active"), "created_at": r.created_at} for r in rows]
+
+
+@router.get("/reports/{day}")
+async def get_report(day: date, request: Request) -> dict[str, Any]:
+    await _authorize(request)
+    async with get_sessionmaker()() as session:
+        r = await session.get(DailyReport, day)
+    if r is None:
+        raise HTTPException(status_code=404, detail={"code": "REPORT_NOT_FOUND", "message": "No report for this day yet."})
+    return {"date": r.report_date.isoformat(), "metrics": r.metrics, "analysis": r.analysis, "error": r.error,
+            "model": r.model, "chats_analysed": r.chats_analysed, "created_at": r.created_at}
+
+
+@router.post("/reports/{day}/generate")
+async def generate_report(day: date, request: Request) -> dict[str, Any]:
+    """(Re)build the day's report now (1-3 minutes)."""
+    await _authorize(request)
+    if day > insights.today_ist():
+        raise HTTPException(status_code=422, detail={"code": "FUTURE_DATE", "message": "That day hasn't happened yet."})
+    await insights.run_daily_report(day)
+    return await get_report(day, request)
 
 
 @router.get("/media/{message_id}")

@@ -1,13 +1,14 @@
 """ORM models for the `agent` schema. Alembic migrations are the source of truth for DDL."""
 
 import uuid
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from typing import Any
 
 from sqlalchemy import (
     BigInteger,
     Boolean,
     CheckConstraint,
+    Date,
     DateTime,
     ForeignKey,
     Identity,
@@ -240,6 +241,22 @@ class OrderDraft(Base):
     mybill_customer_id: Mapped[int | None] = mapped_column(Integer)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+
+
+class DailyReport(Base):
+    """The AI analysis of one IST day's chats and sales (app/insights.py), regenerated on demand."""
+
+    __tablename__ = "daily_reports"
+
+    report_date: Mapped[date] = mapped_column(Date, primary_key=True)
+    metrics: Mapped[dict[str, Any]] = mapped_column(JSONB)
+    analysis: Mapped[dict[str, Any] | None] = mapped_column(JSONB)
+    error: Mapped[str | None] = mapped_column(Text)
+    model: Mapped[str | None] = mapped_column(Text)
+    input_tokens: Mapped[int] = mapped_column(Integer, server_default=sql_text("0"))
+    output_tokens: Mapped[int] = mapped_column(Integer, server_default=sql_text("0"))
+    chats_analysed: Mapped[int] = mapped_column(Integer, server_default=sql_text("0"))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 
 class ProcessedEvent(Base):

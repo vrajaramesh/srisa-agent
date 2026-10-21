@@ -13,7 +13,7 @@ from fastapi.responses import JSONResponse, PlainTextResponse
 from pydantic import BaseModel
 from sqlalchemy.exc import SQLAlchemyError
 
-from app import events, followups, mybill_client, queue, worker, whatsapp_client
+from app import events, followups, insights, mybill_client, queue, worker, whatsapp_client
 from app.channels import instagram
 from app import repositories as repo
 from app.config import get_settings
@@ -353,6 +353,19 @@ async def followups_job(request: Request) -> Response:
     stats = await followups.run()
     logger.info("Follow-up job done", extra={"fields": stats})
     return JSONResponse(stats)
+
+
+@app.post("/internal/jobs/daily-report")
+async def daily_report_job(request: Request) -> Response:
+    """Cloud Scheduler (every evening): today's AI report (app/insights.py)."""
+    settings = get_settings()
+    authorized = settings.scheduler_sa_email and await run_in_threadpool(
+        verify_tasks_token, request.headers.get("Authorization"), settings.tasks_target_url.rstrip("/"),
+        settings.scheduler_sa_email)
+    if not authorized:
+        logger.warning("Rejected /internal/jobs/daily-report: missing or invalid ID token")
+        return Response(status_code=403)
+    return JSONResponse(await insights.run_daily_report(insights.today_ist()))
 
 
 @app.post("/internal/events")

@@ -147,6 +147,10 @@ class MybillClient:
         """DRAFT fabric-only order. Same idempotency rules as create_order."""
         return await self._request("POST", "/api/agent/orders/fabric", json=request)
 
+    async def daily_figures(self, day: str) -> dict[str, Any]:
+        """One IST day's orders, payments and website sales (YYYY-MM-DD)."""
+        return await self._get("/api/agent/reports/daily", params={"date": day})
+
     async def get_order(self, order_no: str) -> dict[str, Any]:
         return await self._get(f"/api/agent/orders/{order_no}")
 

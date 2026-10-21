@@ -116,7 +116,10 @@ class Settings(DatabaseSettings, AgentSettings):
     followups_enabled: bool = True
     followup_enquiry_hours: float = 20      # after her last message (inside the free 24 h window, 9 AM-9 PM IST)
     followup_payment_hours: str = "2,20"    # after the order was created, while unpaid
-    # Cloud Scheduler's service account (OIDC token on the follow-up job).
+    # Daily AI report (app/insights.py): model and effort for the one analysis call per day.
+    insights_model: str = "claude-opus-5-5"
+    insights_effort: str = "high"
+    # Cloud Scheduler's service account (OIDC token on the follow-up and daily-report jobs).
     scheduler_sa_email: str = ""
 
     @property
