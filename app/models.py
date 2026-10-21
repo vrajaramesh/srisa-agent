@@ -192,6 +192,7 @@ class LlmTurn(Base):
 
 
 DRAFT_OPEN, DRAFT_SUBMITTED, DRAFT_CANCELLED = "open", "submitted", "cancelled"
+DRAFT_GARMENT, DRAFT_FABRIC = "garment", "fabric"
 
 
 class OrderDraft(Base):
@@ -212,6 +213,10 @@ class OrderDraft(Base):
     status: Mapped[str] = mapped_column(Text, default=DRAFT_OPEN, server_default=sql_text("'open'"))
     # +1 on every change; the confirmation must match the version the summary was sent for.
     version: Mapped[int] = mapped_column(Integer, default=1, server_default=sql_text("1"))
+    # "garment" (a design, stitched to size) or "fabric" (metres of a fabric, FAB-<id>; no size/options).
+    kind: Mapped[str] = mapped_column(Text, default=DRAFT_GARMENT, server_default=sql_text("'garment'"))
+    fabric_code: Mapped[str | None] = mapped_column(Text)
+    fabric_metres: Mapped[float | None] = mapped_column(Numeric(6, 2))
     design_code: Mapped[str | None] = mapped_column(Text)
     size_code: Mapped[str | None] = mapped_column(Text)
     height_cm: Mapped[float | None] = mapped_column(Numeric(5, 1))

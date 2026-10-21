@@ -20,13 +20,15 @@ from app.agent import flow, ig_handoff, orders
 from app.config import get_agent_settings
 from app.agent.flow import ADDRESS, BROWSING, CONFIRM, CUSTOMISE, ORDER_CREATED, SIZING
 from app.agent.formatting import format_rupees
-from app.models import DRAFT_CANCELLED, DRAFT_OPEN, Conversation, OrderDraft
+from app.models import DRAFT_CANCELLED, DRAFT_FABRIC, DRAFT_GARMENT, DRAFT_OPEN, Conversation, OrderDraft
 from app.mybill_client import MybillClient, MybillNotFound, MybillRejected, MybillUnavailable
 
 logger = logging.getLogger(__name__)
 
 MAX_PHOTOS = 3
 MAX_LATEST = 6
+MAX_FABRICS = 8
+MIN_METRES, MAX_METRES = Decimal("0.5"), Decimal("100")
 HANDOFF_MESSAGE = "A member of our team will reply to you here soon."
 FITS = ("SNUG", "REGULAR", "RELAXED")
 RANGES = {"height_cm": (120, 200), "bust_in": (24, 60), "waist_in": (20, 56), "hip_in": (26, 64)}
@@ -44,6 +46,7 @@ class ToolContext:
     draft: OrderDraft | None = None  # the open draft, if any
     actions: list[dict[str, Any]] = field(default_factory=list)
     designs: dict[str, dict[str, Any]] = field(default_factory=dict)  # per-run cache
+    fabrics: dict[str, dict[str, Any]] = field(default_factory=dict)  # per-run cache
     size_chart: list[dict[str, Any]] | None = None
 
     @property
@@ -58,6 +61,15 @@ class ToolContext:
         if code not in self.designs:
             self.designs[code] = await self.mybill.get_design(code)
         return self.designs[code]
+
+    async def fabric(self, code: str) -> dict[str, Any]:
+        """mybill fabric by FAB-<id> code (cached for this run). Raises MybillNotFound / MybillUnavailable."""
+        if self.mybill is None:
+            raise MybillUnavailable("mybill not configured")
+        code = code.upper()
+        if code not in self.fabrics:
+            self.fabrics[code] = await self.mybill.get_fabric(code)
+        return self.fabrics[code]
 
     async def chart(self) -> list[dict[str, Any]]:
         if self.mybill is None:
@@ -129,7 +141,7 @@ async def progress(ctx: ToolContext) -> dict[str, Any]:
     draft, stage = ctx.draft, ctx.stage
     groups: set[str] = set()
     by_group: dict[int, str] = {}
-    if draft and draft.design_code:
+    if draft and draft.design_code and not flow.is_fabric(draft):
         try:
             groups, by_group, _ = orders.option_maps(await ctx.design(draft.design_code))
         except (MybillNotFound, MybillUnavailable):
@@ -187,6 +199,7 @@ async def get_design(ctx: ToolContext, args: dict[str, Any]) -> dict[str, Any]:
         ],
         "image_count": len(design.get("images", [])),
         "exact_measurements_needed": bool(design.get("exact_measurements")),
+        "fabric_only": _fabric_brief(design.get("fabric")),
     }
 
 
@@ -329,6 +342,7 @@ async def start_order(ctx: ToolContext, args: dict[str, Any]) -> dict[str, Any]:
         ctx.draft = draft
     elif draft.design_code != design["code"]:
         draft.option_ids = []  # options belong to the old design
+    draft.kind, draft.fabric_code, draft.fabric_metres = DRAFT_GARMENT, None, None
     draft.design_code = design["code"]
     draft.mybill_customer_id = customer["customer_id"]
     ctx.conversation.mybill_customer_id = customer["customer_id"]
@@ -562,7 +576,7 @@ async def save_delivery_details(ctx: ToolContext, args: dict[str, Any]) -> dict[
     if ctx.mybill is None:
         return _unavailable()
     try:
-        quote = await ctx.mybill.quote(orders.quote_request(draft))
+        quote = await orders.get_quote(ctx.mybill, draft)
     except MybillUnavailable:
         return _unavailable()
     except MybillRejected as exc:
@@ -580,7 +594,8 @@ async def save_delivery_details(ctx: ToolContext, args: dict[str, Any]) -> dict[
 async def send_order_summary(ctx: ToolContext, args: dict[str, Any]) -> dict[str, Any]:
     if (err := _require_draft(ctx)) is not None:
         return err
-    design = await _fetch_design(ctx, ctx.draft.design_code)
+    design = (await _fetch_fabric(ctx, ctx.draft.fabric_code) if flow.is_fabric(ctx.draft)
+              else await _fetch_design(ctx, ctx.draft.design_code))
     if "error" in design:
         return design
     try:
@@ -589,6 +604,135 @@ async def send_order_summary(ctx: ToolContext, args: dict[str, Any]) -> dict[str
         return _unavailable()
     except MybillRejected as exc:
         return {"error": "quote_rejected", "code": exc.code, "message": exc.message}
+
+
+# ── fabric only (metres of a fabric, no stitching) ──────────────────────────
+
+def _fabric_brief(fabric: dict[str, Any] | None) -> dict[str, Any] | None:
+    """What the model may say about a fabric. Stock is only 'in stock' / 'up to N m' (never the exact count)."""
+    if not fabric:
+        return None
+    available = float(fabric.get("available_metres") or 0)
+    return {"code": fabric["code"], "name": fabric["name"], "price_per_metre": fabric["price_per_metre"],
+            "category": fabric.get("category"), "description": fabric.get("description"),
+            "in_stock": available >= MIN_METRES, "max_metres": min(available, MAX_METRES) if available else 0,
+            "photo_count": len(fabric.get("images") or [])}
+
+
+async def _fetch_fabric(ctx: ToolContext, code: str | None) -> dict[str, Any]:
+    code = (code or "").strip().upper()
+    if not re.fullmatch(r"FAB-?\d{1,9}", code):
+        return {"error": "invalid_input", "detail": "fabric code looks like FAB-6223"}
+    try:
+        return await ctx.fabric(code if "-" in code else f"FAB-{code[3:]}")
+    except MybillNotFound:
+        return {"error": "not_found", "code": code}
+    except MybillUnavailable:
+        return _unavailable()
+
+
+def _metres(args: dict[str, Any]) -> tuple[Decimal | None, dict[str, Any] | None]:
+    """Metres from 0.5 to 100 in steps of 0.25."""
+    try:
+        value = Decimal(str(args.get("metres"))).quantize(Decimal("0.01"))
+    except (InvalidOperation, ValueError):
+        return None, {"error": "invalid_input", "detail": "metres must be a number, e.g. 2.5"}
+    if not MIN_METRES <= value <= MAX_METRES or (value * 4) % 1:
+        return None, {"error": "invalid_input", "detail": f"metres must be {MIN_METRES:g}-{MAX_METRES:g} in steps of 0.25"}
+    return value, None
+
+
+async def search_fabrics(ctx: ToolContext, args: dict[str, Any]) -> dict[str, Any]:
+    if ctx.mybill is None:
+        return _unavailable()
+    query = str(args.get("query") or "").strip()[:100]
+    try:
+        found = await ctx.mybill.search_fabrics(query, _int(args.get("limit"), 5, 1, MAX_FABRICS))
+    except MybillUnavailable:
+        return _unavailable()
+    for f in found:
+        ctx.fabrics[f["code"].upper()] = f
+    if not found:
+        return {"fabrics": [], "note": "Nothing in stock matches. Ask her to describe it differently or offer the team's help."}
+    return {"fabrics": [_fabric_brief(f) for f in found]}
+
+
+async def get_fabric(ctx: ToolContext, args: dict[str, Any]) -> dict[str, Any]:
+    fabric = await _fetch_fabric(ctx, args.get("code"))
+    return fabric if "error" in fabric else _fabric_brief(fabric)
+
+
+async def send_fabric_photos(ctx: ToolContext, args: dict[str, Any]) -> dict[str, Any]:
+    fabric = await _fetch_fabric(ctx, args.get("code"))
+    if "error" in fabric:
+        return fabric
+    images = (fabric.get("images") or [])[:_int(args.get("max_photos"), MAX_PHOTOS, 1, MAX_PHOTOS)]
+    if not images:
+        return {"error": "no_photos", "note": "This fabric has no photos yet; offer the team's help if she wants to see it."}
+    caption = f"{fabric['name']} ({fabric['code']}) – {format_rupees(fabric['price_per_metre'])}/m"
+    for i, image in enumerate(images):
+        if not await ctx.messenger.send_image(image["url"], caption if i == 0 else None):
+            return {"error": "send_failed"}
+    ctx.actions.append({"action": "fabric_photos_sent", "code": fabric["code"], "count": len(images)})
+    return {"sent": len(images), "note": "The photos are on her screen."}
+
+
+async def start_fabric_order(ctx: ToolContext, args: dict[str, Any]) -> dict[str, Any]:
+    fabric = await _fetch_fabric(ctx, args.get("code"))
+    if "error" in fabric:
+        return fabric
+    metres, err = _metres(args)
+    if err:
+        return err
+    if metres > Decimal(str(fabric.get("available_metres") or 0)):
+        brief = _fabric_brief(fabric)
+        return {"error": "insufficient_stock", "max_metres": brief["max_metres"],
+                "hint": "Tell her how much we can send, or offer the team's help for more."}
+    if ctx.mybill is None:
+        return _unavailable()
+    try:
+        customer = await ctx.mybill.upsert_customer(**orders.customer_identity(ctx.conversation))
+    except (MybillUnavailable, MybillRejected):
+        return _unavailable()
+    draft = ctx.draft if ctx.draft is not None and ctx.draft.status == DRAFT_OPEN else None
+    if draft is None:
+        draft = await ctx.store.new_draft(ctx.conversation)
+        ctx.draft = draft
+    draft.kind, draft.fabric_code, draft.fabric_metres = DRAFT_FABRIC, fabric["code"], metres
+    draft.design_code, draft.size_code, draft.option_ids, draft.qty = None, None, [], 1
+    draft.mybill_customer_id = customer["customer_id"]
+    ctx.conversation.mybill_customer_id = customer["customer_id"]
+    flow.touch(draft)
+    flow.set_stage(ctx.conversation, ADDRESS)
+    ctx.actions.append({"action": "fabric_order_started", "code": fabric["code"], "metres": float(metres)})
+    return {"ok": True, "fabric": _fabric_brief(fabric), "metres": float(metres),
+            "next": "Ask for her delivery name and address (save_delivery_details).", **(await progress(ctx))}
+
+
+async def set_fabric_metres(ctx: ToolContext, args: dict[str, Any]) -> dict[str, Any]:
+    if (err := _require_draft(ctx)) is not None:
+        return err
+    draft = ctx.draft
+    if not flow.is_fabric(draft):
+        return {"error": "not_a_fabric_order"}
+    metres, err = _metres(args)
+    if err:
+        return err
+    draft.fabric_metres = metres
+    flow.touch(draft)
+    if ctx.stage == CONFIRM:
+        flow.set_stage(ctx.conversation, ADDRESS)   # the quote must be refreshed before the summary
+        if not flow.missing_for(ADDRESS, draft):
+            try:
+                quote = await orders.get_quote(ctx.mybill, draft)
+            except MybillUnavailable:
+                return _unavailable()
+            except MybillRejected as exc:
+                return {"error": "quote_rejected", "code": exc.code, "message": exc.message}
+            draft.last_quote = quote
+            flow.set_stage(ctx.conversation, CONFIRM)
+            return {"ok": True, "metres": float(metres), "next": "Call send_order_summary now."}
+    return {"ok": True, "metres": float(metres), **(await progress(ctx))}
 
 
 def _go_back(target: str) -> Callable[[ToolContext, dict[str, Any]], Awaitable[dict[str, Any]]]:
@@ -636,6 +780,7 @@ async def send_whatsapp_order_link(ctx: ToolContext, args: dict[str, Any]) -> di
 
 _CODE = {"type": "string", "description": "Design code exactly as shown to the customer, e.g. KUR-101."}
 _NUM = {"type": "number"}
+_FAB = {"type": "string", "description": "Fabric code exactly as returned by search_fabrics/get_design, e.g. FAB-6223."}
 SHOPPING = frozenset({BROWSING, ORDER_CREATED})
 
 TOOLS: list[Tool] = [
@@ -688,6 +833,30 @@ TOOLS: list[Tool] = [
          "Start an order for a design when she says she wants to order/buy it. Tells you whether she has saved "
          "measurements with us. Then guide her through size, options and address one step at a time.",
          {"type": "object", "properties": {"design_code": _CODE}, "required": ["design_code"]}, start_order, SHOPPING),
+    # Fabric only (no stitching)
+    Tool("search_fabrics",
+         "Find fabrics we sell by the metre (in stock) by words like 'madras check', 'pink cotton', 'silk': code "
+         "(FAB-<id>), name, price per metre, whether in stock and the most she can order. Use it when she wants "
+         "fabric/material only, or asks what fabrics we have.",
+         {"type": "object", "properties": {"query": {"type": "string"},
+          "limit": {"type": "integer", "minimum": 1, "maximum": MAX_FABRICS}}, "required": ["query"]},
+         search_fabrics, SHOPPING),
+    Tool("get_fabric",
+         "Look up one fabric by its code (FAB-6223): name, price per metre, description, in stock and max metres.",
+         {"type": "object", "properties": {"code": _FAB}, "required": ["code"]}, get_fabric),
+    Tool("send_fabric_photos",
+         "Send her up to 3 photos of a fabric, captioned with name and price per metre.",
+         {"type": "object", "properties": {"code": _FAB, "max_photos": {"type": "integer", "minimum": 1,
+          "maximum": MAX_PHOTOS}}, "required": ["code"]}, send_fabric_photos, SHOPPING),
+    Tool("start_fabric_order",
+         "Start a fabric-only order (no stitching) once she has chosen the fabric and said how many metres "
+         "(0.5-100, steps of 0.25). Then ask for the delivery address.",
+         {"type": "object", "properties": {"code": _FAB, "metres": {**_NUM, "description": "e.g. 2.5"}},
+          "required": ["code", "metres"]}, start_fabric_order, SHOPPING),
+    Tool("set_fabric_metres",
+         "Change how many metres of fabric she wants in the fabric order in progress.",
+         {"type": "object", "properties": {"metres": _NUM}, "required": ["metres"]}, set_fabric_metres,
+         frozenset({ADDRESS, CONFIRM})),
     # Sizing
     Tool("send_size_options",
          "Send her a tappable list of our sizes (with bust/waist/hip). Prefer this to typing the chart out.",
@@ -757,6 +926,7 @@ TOOLS: list[Tool] = [
 
 # Instagram is for discovery: browsing tools + the WhatsApp order link. Everything else is WhatsApp only.
 INSTAGRAM_TOOLS = frozenset({"get_design", "list_latest_designs", "send_design_photos", "set_current_design",
+                             "search_fabrics", "get_fabric", "send_fabric_photos",
                              "get_size_chart", "request_human_help", "send_whatsapp_order_link"})
 INSTAGRAM_ONLY = frozenset({"send_whatsapp_order_link"})
 

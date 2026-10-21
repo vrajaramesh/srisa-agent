@@ -266,7 +266,8 @@ async def _confirmation_path(session: AsyncSession, ctx: tools.ToolContext, pend
     confirmed = orders.find_confirmation(pending, await repo.last_outbound(session, ctx.conversation.id), ctx.draft)
     if confirmed is None or mybill is None:
         return None
-    outcome = await orders.confirm(ctx.conversation, ctx.draft, confirmed, ctx.store, mybill, ctx.messenger, ctx.design)
+    outcome = await orders.confirm(ctx.conversation, ctx.draft, confirmed, ctx.store, mybill, ctx.messenger, ctx.design,
+                                  ctx.fabric)
     logger.info("Confirmation", extra={"fields": {"conversation_id": str(ctx.conversation.id), "outcome": outcome.kind,
                                                   "order_no": outcome.order_no}})
     if outcome.kind in ("created", "already_submitted", "resent_summary"):

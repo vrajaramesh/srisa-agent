@@ -226,7 +226,7 @@ async def chat(args: argparse.Namespace) -> None:
             # Same code path as the worker: confirmation first (no model), then shortcuts + agent.
             confirmed = orders.find_confirmation([message], last_out, ctx.draft)
             if confirmed:
-                outcome = await orders.confirm(conversation, ctx.draft, confirmed, store, mybill, messenger, ctx.design)
+                outcome = await orders.confirm(conversation, ctx.draft, confirmed, store, mybill, messenger, ctx.design, ctx.fabric)
                 print(f"  {DIM}⚙ confirmation: {outcome.kind} {outcome.order_no or ''} {outcome.detail or ''}{RESET}")
                 if outcome.kind not in ("unknown_draft", "not_ready"):
                     history.extend(messenger.messages[len(messenger.messages) - 1:])

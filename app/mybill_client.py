@@ -130,6 +130,23 @@ class MybillClient:
         """DRAFT order in mybill. Same idempotency_key -> same order (safe to retry)."""
         return await self._request("POST", "/api/agent/orders", json=request)
 
+    async def search_fabrics(self, query: str, limit: int = 5) -> list[dict[str, Any]]:
+        """In-stock fabrics sold by the metre: [{product_id, code (FAB-<id>), name, category, description,
+        price_per_metre, available_metres, images}]."""
+        return await self._get("/api/agent/fabrics", params={"q": query, "limit": limit})
+
+    async def get_fabric(self, code: str) -> dict[str, Any]:
+        """One fabric by FAB-<id> code (also when out of stock)."""
+        return await self._get(f"/api/agent/fabrics/{code}")
+
+    async def fabric_quote(self, request: dict[str, Any]) -> dict[str, Any]:
+        """{product_id, metres, pincode?} -> price (price_per_metre x metres + delivery) and delivery estimate."""
+        return await self._request("POST", "/api/agent/orders/fabric/quote", json=request)
+
+    async def create_fabric_order(self, request: dict[str, Any]) -> dict[str, Any]:
+        """DRAFT fabric-only order. Same idempotency rules as create_order."""
+        return await self._request("POST", "/api/agent/orders/fabric", json=request)
+
     async def get_order(self, order_no: str) -> dict[str, Any]:
         return await self._get(f"/api/agent/orders/{order_no}")
 

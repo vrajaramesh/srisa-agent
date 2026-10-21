@@ -34,6 +34,7 @@ class PaymentEvent(BaseModel):
     exact_measurements_required: bool = False   # the tailor calls her for exact measurements (design flag)
     design_code: str | None = None
     design_name: str | None = None
+    order_type: str | None = None   # GARMENT or FABRIC
 
 
 def _first_name(name: str | None) -> str:
@@ -53,9 +54,11 @@ def message_for(event: PaymentEvent) -> str | None:
         thanks = f"Thank you, {_first_name(event.customer_name)}! " if _first_name(event.customer_name) else "Thank you! "
         amount = f" ({format_rupees(event.amount)})" if event.amount is not None else ""
         eta = _date(event.estimated_delivery_date)
+        status = ("Your fabric is being cut and packed 📦" if event.order_type == "FABRIC"
+                  else "Your outfit is now with our tailor 🧵")
         text = (f"✅ Payment received for order {event.order_no}{amount}. {thanks}"
-                f"Your outfit is now with our tailor 🧵" + (f" - estimated delivery {eta}." if eta else "."))
-        if event.exact_measurements_required:
+                f"{status}" + (f" - estimated delivery {eta}." if eta else "."))
+        if event.exact_measurements_required and event.order_type != "FABRIC":
             phone = f" on {event.customer_phone}" if event.customer_phone else ""
             text += f"\n📏 Our tailor will call you{phone} shortly to take your exact measurements."
         return text

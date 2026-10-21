@@ -5,12 +5,15 @@ and the worker's confirmation path), never because the model says so.
                               ▲                            ▲                    ▲                          │
                               └──────── change_size ───────┴── change_option ───┴──── change_address ──────┤
     order_created ◀──────────────── confirmation (code path in agent/orders.py) ───────────────────────────┘
+
+Fabric-only drafts (kind "fabric": metres of a FAB-<id> fabric) skip sizing and customise:
+    browsing ─start_fabric_order─▶ address ─(details+quote)─▶ confirm ─▶ order_created
 """
 
 from datetime import datetime, timezone
 from typing import Any
 
-from app.models import Conversation, OrderDraft
+from app.models import DRAFT_FABRIC, Conversation, OrderDraft
 
 BROWSING, SIZING, CUSTOMISE, ADDRESS, CONFIRM, ORDER_CREATED = (
     "browsing", "sizing", "customise", "address", "confirm", "order_created")
@@ -60,6 +63,8 @@ def missing_for(stage: str, draft: OrderDraft | None, design_groups: set[str] | 
     """What a stage still needs before it can be left."""
     if draft is None:
         return ["design_code"] if stage in ORDERING_STAGES else []
+    if is_fabric(draft) and stage in (SIZING, CUSTOMISE):
+        return [] if draft.fabric_code and draft.fabric_metres else ["fabric_metres"]
     if stage == SIZING:
         if draft.size_code == CUSTOM_SIZE:
             return []
@@ -104,6 +109,10 @@ def next_stage(stage: str, draft: OrderDraft | None, design_groups: set[str] | N
     return stage
 
 
+def is_fabric(draft: OrderDraft | None) -> bool:
+    return bool(draft is not None and draft.kind == DRAFT_FABRIC)
+
+
 def can_go_back(current: str, target: str) -> bool:
     """Any ordering stage can return to sizing/customise/address (never forward, never after order_created)."""
     return (target in BACK_TARGETS and current in ORDERING_STAGES and ORDER[target] <= ORDER[current])
@@ -111,6 +120,8 @@ def can_go_back(current: str, target: str) -> bool:
 
 def go_back(conversation: Conversation, draft: OrderDraft, target: str) -> None:
     current = stage_of(conversation)
+    if is_fabric(draft) and target in (SIZING, CUSTOMISE):
+        raise FlowError("a fabric order has no size or options; use set_fabric_metres to change the metres")
     if not can_go_back(current, target):
         raise FlowError(f"cannot go back from {current} to {target}")
     touch(draft)
@@ -121,6 +132,11 @@ def draft_summary(draft: OrderDraft | None) -> dict[str, Any]:
     """Filled fields only (for facts/progress). Never includes prices except the stored quote total."""
     if draft is None:
         return {}
+    if is_fabric(draft):
+        fields = ("fabric_code", "fabric_metres", "delivery_name", "delivery_phone", "address_line1", "address_line2",
+                  "city", "state", "pincode")
+        return {"kind": "fabric", **{f: (float(v) if hasattr(v, "is_finite") else v)
+                                     for f in fields if (v := getattr(draft, f)) not in (None, "")}}
     fields = ("design_code", "size_code", "height_cm", "fit_preference", "bust_in", "waist_in", "hip_in",
               "measurement_notes", "qty", "delivery_name", "delivery_phone", "address_line1", "address_line2",
               "city", "state", "pincode")

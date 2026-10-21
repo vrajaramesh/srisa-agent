@@ -81,12 +81,29 @@ def option_maps(design: dict[str, Any]) -> tuple[set[str], dict[int, str], dict[
     return groups, by_group, options
 
 
+def fabric_product_id(draft: OrderDraft) -> int:
+    """FAB-6223 -> 6223 (mybill product id)."""
+    return int(str(draft.fabric_code).split("-", 1)[1])
+
+
 def quote_request(draft: OrderDraft) -> dict[str, Any]:
+    if flow.is_fabric(draft):
+        fabric: dict[str, Any] = {"product_id": fabric_product_id(draft), "metres": float(draft.fabric_metres)}
+        if draft.pincode:
+            fabric["pincode"] = draft.pincode
+        return fabric
     body: dict[str, Any] = {"design_code": draft.design_code, "size_code": draft.size_code,
                             "option_ids": list(draft.option_ids or []), "qty": draft.qty or 1}
     if draft.pincode:
         body["pincode"] = draft.pincode
     return body
+
+
+async def get_quote(mybill: MybillClient, draft: OrderDraft) -> dict[str, Any]:
+    """Fresh mybill price for the draft (garment or fabric)."""
+    if flow.is_fabric(draft):
+        return await mybill.fabric_quote(quote_request(draft))
+    return await mybill.quote(quote_request(draft))
 
 
 def measurements_payload(draft: OrderDraft) -> dict[str, Any]:
@@ -113,18 +130,21 @@ def order_attribution(conversation: Conversation | None) -> dict[str, Any]:
 
 def order_request(draft: OrderDraft, customer_id: int, channel: str | None = None,
                   conversation: Conversation | None = None) -> dict[str, Any]:
-    """POST /api/agent/orders body. The idempotency key ties the order to this exact draft version."""
-    return {
+    """POST /api/agent/orders (or /orders/fabric) body. The idempotency key ties the order to this exact draft version."""
+    body = {
         **order_attribution(conversation),
         **quote_request(draft),
         "customer_id": customer_id,
-        "measurements": measurements_payload(draft),
         "delivery": {"name": draft.delivery_name, "phone": draft.delivery_phone, "address_line1": draft.address_line1,
                      "address_line2": draft.address_line2, "city": draft.city, "state": draft.state,
                      "pincode": draft.pincode},
         "channel": channel or (conversation.channel.upper() if conversation is not None else "WHATSAPP"),
         "idempotency_key": f"{draft.id}:{draft.version}",
     }
+    body.pop("pincode", None)   # the delivery address carries it
+    if not flow.is_fabric(draft):
+        body["measurements"] = measurements_payload(draft)
+    return body
 
 
 def _fmt_date(value: str | None) -> str | None:
@@ -134,8 +154,13 @@ def _fmt_date(value: str | None) -> str | None:
         return value
 
 
+def _metres(value: Any) -> str:
+    return f"{float(value):g} m"
+
+
 def summary_text(draft: OrderDraft, design: dict[str, Any], quote: dict[str, Any], note: str | None = None) -> str:
-    """The order summary - every price and date exactly as returned by the mybill quote."""
+    """The order summary - every price and date exactly as returned by the mybill quote.
+    For a fabric draft `design` is the fabric (name, code, price_per_metre)."""
     b = quote["breakdown"]
     fit = (draft.fit_preference or "").title()
     size_line = ("📏 Size: Custom (our tailor will call you after payment)" if draft.size_code == flow.CUSTOM_SIZE
@@ -146,12 +171,15 @@ def summary_text(draft: OrderDraft, design: dict[str, Any], quote: dict[str, Any
     address = ", ".join(p for p in (draft.delivery_name, draft.address_line1, draft.address_line2, draft.city,
                                     f"{draft.state} {draft.pincode}") if p)
     delivery = format_rupees(b["delivery_charge"]) if float(b["delivery_charge"]) else "Free"
+    if flow.is_fabric(draft):
+        item_lines = [f"🧵 {design.get('name', draft.fabric_code)} ({draft.fabric_code}) – fabric only",
+                      f"📏 {_metres(draft.fabric_metres)} × {format_rupees(quote.get('price_per_metre', b['unit_price']))}/m"]
+    else:
+        item_lines = [f"👗 {design.get('name', draft.design_code)} ({draft.design_code})", size_line,
+                      *([f"✂️ {opts}"] if opts else []), f"🔢 Qty {b.get('qty', draft.qty)}"]
     lines = ([note, ""] if note else []) + [
         "Please check your order 👇", "",
-        f"👗 {design.get('name', draft.design_code)} ({draft.design_code})",
-        size_line,
-        *([f"✂️ {opts}"] if opts else []),
-        f"🔢 Qty {b.get('qty', draft.qty)}",
+        *item_lines,
         "",
         f"📦 {address}",
         f"📞 {draft.delivery_phone}",
@@ -168,7 +196,7 @@ def summary_text(draft: OrderDraft, design: dict[str, Any], quote: dict[str, Any
 async def send_summary(conversation: Conversation, draft: OrderDraft, mybill: MybillClient, messenger: Messenger,
                        design: dict[str, Any], note: str | None = None) -> dict[str, Any]:
     """Fresh quote -> ONE summary message with Confirm/Change buttons; marks this version as awaiting confirmation."""
-    quote = await mybill.quote(quote_request(draft))
+    quote = await get_quote(mybill, draft)
     if not quote.get("serviceable", True):
         return {"error": "not_serviceable", "pincode": draft.pincode}
     draft.last_quote = quote
@@ -251,7 +279,7 @@ def find_confirmation(pending: list[Message], last_outbound: Message | None,
 
 async def confirm(conversation: Conversation, draft: OrderDraft | None, confirmed: tuple[uuid.UUID, int],
                   store: OrderStore, mybill: MybillClient, messenger: Messenger,
-                  design_loader: Any) -> ConfirmOutcome:
+                  design_loader: Any, fabric_loader: Any = None) -> ConfirmOutcome:
     """Create the mybill order for a confirmed summary - at most once, and only for the version she saw."""
     draft_id, version = confirmed
     if draft is None or draft.id != draft_id:
@@ -263,11 +291,12 @@ async def confirm(conversation: Conversation, draft: OrderDraft | None, confirme
     if draft.status != DRAFT_OPEN:
         return ConfirmOutcome("already_submitted", draft.mybill_order_no)
 
-    design = await design_loader(draft.design_code)
+    fabric = flow.is_fabric(draft)
+    design = await (fabric_loader(draft.fabric_code) if fabric else design_loader(draft.design_code))
     if version != draft.version or draft.summary_sent_version != draft.version:
         # She confirmed an older summary: show the current one instead of ordering something she didn't see -
         # but only if the order is complete again; otherwise let the agent continue collecting details.
-        groups, by_group, _ = option_maps(design)
+        groups, by_group, _ = ({}, {}, {}) if fabric else option_maps(design)
         incomplete = [f for s in (flow.SIZING, flow.CUSTOMISE, flow.ADDRESS)
                       for f in flow.missing_for(s, draft, groups, by_group)]
         if incomplete:
@@ -284,7 +313,8 @@ async def confirm(conversation: Conversation, draft: OrderDraft | None, confirme
         if customer_id is None:
             customer_id = (await mybill.upsert_customer(**customer_identity(conversation)))["customer_id"]
             conversation.mybill_customer_id = draft.mybill_customer_id = customer_id
-        order = await mybill.create_order(order_request(draft, customer_id, conversation=conversation))
+        request = order_request(draft, customer_id, conversation=conversation)
+        order = await (mybill.create_fabric_order(request) if fabric else mybill.create_order(request))
     except MybillUnavailable as exc:
         return ConfirmOutcome("unavailable", detail=str(exc))
     except MybillRejected as exc:
