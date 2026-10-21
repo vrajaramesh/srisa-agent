@@ -17,7 +17,7 @@ from decimal import Decimal, InvalidOperation
 from typing import Any
 
 from app.agent import flow, ig_handoff, orders
-from app.config import get_agent_settings
+from app.config import get_agent_settings, get_settings
 from app.agent.flow import ADDRESS, BROWSING, CONFIRM, CUSTOMISE, ORDER_CREATED, SIZING
 from app.agent.formatting import format_rupees
 from app.models import DRAFT_CANCELLED, DRAFT_GARMENT, DRAFT_OPEN, Conversation, OrderDraft
@@ -28,7 +28,7 @@ logger = logging.getLogger(__name__)
 MAX_PHOTOS = 3
 MAX_LATEST = 6
 MAX_FABRICS = 8
-MAX_FABRIC_LINKS = 5
+MAX_FABRIC_CARDS = 3
 SHOP_NAME = "srisafabrics.com"
 HANDOFF_MESSAGE = "A member of our team will reply to you here soon."
 FITS = ("SNUG", "REGULAR", "RELAXED")
@@ -679,16 +679,54 @@ async def send_fabric_photos(ctx: ToolContext, args: dict[str, Any]) -> dict[str
     return {"sent": len(images), "note": "The photos are on her screen."}
 
 
+def design_fabrics(design: dict[str, Any]) -> list[dict[str, Any]]:
+    """A design's fabrics that can be bought on the website now (online, in stock)."""
+    return [{"name": f.get("label") or f.get("name") or "Fabric", "price": f.get("price"), "unit": f.get("unit"),
+             "url": f["url"], "image": f.get("image_url")}
+            for f in design.get("fabrics") or [] if f.get("online") is not False and f.get("in_stock") is not False]
+
+
+def all_fabrics_url(design_code: str) -> str:
+    """The website page listing every fabric of the design."""
+    return f"{get_settings().shop_url.rstrip('/')}/?fabrics={design_code}"
+
+
+def fabric_price_text(items: list[dict[str, Any]]) -> str:
+    prices = sorted({float(i["price"]) for i in items if i.get("price") is not None})
+    if not prices:
+        return ""
+    per = _per_unit(prices[0], items[0].get("unit")).split("/", 1)
+    unit = f"/{per[1]}" if len(per) > 1 else ""
+    return (f"{format_rupees(prices[0])}{unit}" if len(prices) == 1 else f"from {format_rupees(prices[0])}{unit}")
+
+
+async def offer_fabric(ctx: ToolContext, design: dict[str, Any]) -> bool:
+    """One short message after the design's first reply: the fabric is also sold alone, with a button to the
+    website (the product itself, or the page listing all its fabrics). True if nothing to send or sent."""
+    items = design_fabrics(design)
+    if not items:
+        return True
+    url = items[0]["url"] if len(items) == 1 else all_fabrics_url(design["code"])
+    price = fabric_price_text(items)
+    body = ("🧵 Prefer only the fabric? We sell it separately too" + (f" – {price}" if price else "") +
+            ". Buy it on our website 👇")
+    sent = await ctx.messenger.send_link_button(body, "Shop the fabric", url)
+    if sent:
+        ctx.actions.append({"action": "fabric_offered", "code": design["code"], "options": len(items)})
+    return sent
+
+
 async def send_fabric_links(ctx: ToolContext, args: dict[str, Any]) -> dict[str, Any]:
-    """Each fabric as a message with its photo, name, price and a "Buy on <shop>" button to its website page."""
+    """Up to 3 fabrics as messages with photo, name, price and a "Buy on <shop>" button to its website page;
+    for a design with more, one more button opens the website page listing all of them."""
     items: list[dict[str, Any]] = []
+    design_code: str | None = None
     if args.get("design_code"):
         design = await _fetch_design(ctx, _code(args.get("design_code")))
         if "error" in design:
             return design
-        items = [{"name": f.get("label") or f.get("name") or "Fabric", "price": f.get("price"), "unit": f.get("unit"),
-                  "url": f["url"], "image": f.get("image_url")}
-                 for f in design.get("fabrics") or [] if f.get("online") is not False and f.get("in_stock") is not False]
+        design_code = design["code"]
+        items = design_fabrics(design)
         if not items:
             return {"error": "no_fabric_links", "note": "This design's fabric isn't sold separately online. Offer "
                     "search_fabrics for similar fabrics or the team's help."}
@@ -704,12 +742,16 @@ async def send_fabric_links(ctx: ToolContext, args: dict[str, Any]) -> dict[str,
     else:
         return {"error": "invalid_input", "detail": "give design_code or fabric_code"}
     button = f"Buy on {SHOP_NAME}"
-    for item in items[:MAX_FABRIC_LINKS]:
+    for item in items[:MAX_FABRIC_CARDS]:
         body = f"🧵 {item['name']}{_per_unit(item['price'], item['unit'])}\nTap below to see it and buy on our website."
         if not await ctx.messenger.send_link_button(body, button, item["url"], item["image"]):
             return {"error": "send_failed"}
-    ctx.actions.append({"action": "fabric_links_sent", "count": min(len(items), MAX_FABRIC_LINKS)})
-    return {"sent": min(len(items), MAX_FABRIC_LINKS),
+    if design_code and len(items) > MAX_FABRIC_CARDS:
+        body = f"🧵 See all {len(items)} fabric options for this design on our website 👇"
+        if not await ctx.messenger.send_link_button(body, f"See all {len(items)} fabrics", all_fabrics_url(design_code)):
+            return {"error": "send_failed"}
+    ctx.actions.append({"action": "fabric_links_sent", "count": len(items)})
+    return {"sent": len(items),
             "note": "The links are on her screen. She buys on the website (add to cart, checkout there). Don't take "
                     "a fabric order in chat or repeat the URLs."}
 

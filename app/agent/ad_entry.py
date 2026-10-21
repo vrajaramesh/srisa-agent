@@ -101,6 +101,9 @@ async def send_first_reply(ctx: tools.ToolContext, referral: Referral, design: d
     if not await ctx.messenger.send_buttons(body, buttons(design["code"]), {"kind": "ad_entry", "code": design["code"]}):
         return False
     ctx.actions.append({"action": "ad_first_reply", "code": design["code"], "photo": bool(images)})
+    # The fabric is also sold alone on the website. A failure here doesn't redo the reply above.
+    if not await tools.offer_fabric(ctx, design):
+        logger.warning("Fabric offer not sent", extra={"fields": {"code": design["code"], "error": ctx.messenger.error}})
     return True
 
 
