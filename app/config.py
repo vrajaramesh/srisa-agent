@@ -112,6 +112,17 @@ class Settings(DatabaseSettings, AgentSettings):
     admin_api_key: SecretStr | None = None
     admin_allowed_emails: str = ""
 
+    # Follow-ups for quiet customers (app/followups.py, POST /internal/jobs/followups every 30 min).
+    followups_enabled: bool = True
+    followup_enquiry_hours: float = 20      # after her last message (inside the free 24 h window, 9 AM-9 PM IST)
+    followup_payment_hours: str = "2,20"    # after the order was created, while unpaid
+    # Cloud Scheduler's service account (OIDC token on the follow-up job).
+    scheduler_sa_email: str = ""
+
+    @property
+    def followup_payment_hour_list(self) -> list[float]:
+        return sorted(float(h) for h in self.followup_payment_hours.split(",") if h.strip())
+
     @property
     def staff_alert_number_list(self) -> list[str]:
         return [n.strip().lstrip("+").replace(" ", "") for n in self.staff_alert_numbers.split(",") if n.strip()]

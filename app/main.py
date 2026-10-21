@@ -13,7 +13,7 @@ from fastapi.responses import JSONResponse, PlainTextResponse
 from pydantic import BaseModel
 from sqlalchemy.exc import SQLAlchemyError
 
-from app import events, mybill_client, queue, worker, whatsapp_client
+from app import events, followups, mybill_client, queue, worker, whatsapp_client
 from app.channels import instagram
 from app import repositories as repo
 from app.config import get_settings
@@ -338,6 +338,21 @@ async def resume_conversation(conversation_id: uuid.UUID, request: Request) -> R
     logger.info("Conversation resumed by admin",
                 extra={"fields": {"conversation_id": str(conversation_id), "previous_reason": previous}})
     return JSONResponse({"conversation_id": str(conversation_id), "needs_human": False})
+
+
+@app.post("/internal/jobs/followups")
+async def followups_job(request: Request) -> Response:
+    """Cloud Scheduler (every 30 min): reminders for quiet customers and unpaid orders (app/followups.py)."""
+    settings = get_settings()
+    authorized = settings.scheduler_sa_email and await run_in_threadpool(
+        verify_tasks_token, request.headers.get("Authorization"), settings.tasks_target_url.rstrip("/"),
+        settings.scheduler_sa_email)
+    if not authorized:
+        logger.warning("Rejected /internal/jobs/followups: missing or invalid ID token")
+        return Response(status_code=403)
+    stats = await followups.run()
+    logger.info("Follow-up job done", extra={"fields": stats})
+    return JSONResponse(stats)
 
 
 @app.post("/internal/events")

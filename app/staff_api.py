@@ -119,7 +119,8 @@ async def get_conversation(conversation_id: uuid.UUID, request: Request,
         messages = [{"id": str(m.id), "direction": m.direction,
                      "author": m.author or ("customer" if m.direction == INBOUND else "bot"),
                      "type": m.type, "text": _display_text(m), "status": m.status, "at": m.created_at,
-                     "image_url": _image_url(m), "media": _media_kind(m)} for m in reversed(rows)]
+                     "image_url": _image_url(m), "media": _media_kind(m),
+                     "followup": (m.raw or {}).get("followup")} for m in reversed(rows)]
         return {**_summary(conversation, rows[0] if rows else None, waiting.get(conversation_id, 0)),
                 "messages": messages}
 

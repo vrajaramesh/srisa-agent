@@ -77,6 +77,13 @@ class WorkerMessenger:
                 return False
         return True
 
+    async def send_text_meta(self, text: str, meta: dict) -> bool:
+        """Like send_text, with extra fields on every recorded part (e.g. {"followup": "payment"})."""
+        for part in self.adapter.split_text(text):
+            if not self._record(await self.adapter.send_text(self._to, part), part, "text", meta):
+                return False
+        return True
+
     async def send_image(self, url: str, caption: str | None) -> bool:
         if self.adapter.image_captions:
             return self._record(await self.adapter.send_image(self._to, url, caption), f"[photo] {caption or url}",
