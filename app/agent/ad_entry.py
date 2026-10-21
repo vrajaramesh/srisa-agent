@@ -31,6 +31,18 @@ def is_ad_greeting(text: str | None) -> bool:
     return bool(AD_GREETING.match(text or ""))
 
 
+# The ad's pre-filled order message ("Hi SRISA! I'd like to order FRO-11 🛍️") - the first reply answers it.
+_ORDER_PREFILL = re.compile(r"(?i)\bi'?d like to order\b|\bi want to order\b")
+
+
+def asks_something(message: Message) -> bool:
+    """A typed message beyond Meta's greeting / the pre-filled order text (e.g. "Price", "Is it readymade?"),
+    which the deterministic first reply doesn't answer. Taps and media don't count."""
+    text = (message.text or "").strip()
+    return bool(text) and not message.reply_id and message.type == "text" and not is_ad_greeting(text) \
+        and not _ORDER_PREFILL.search(text)
+
+
 def inferred_referral(entry: Any) -> Referral:
     """A Referral rebuilt from the newest real ad entry (no click id / welcome text: we didn't get this tap's)."""
     return Referral(source_id=entry.source_id, source_type=entry.source_type, source_url=entry.source_url,

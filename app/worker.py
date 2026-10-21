@@ -333,6 +333,8 @@ async def _ad_entry_path(session: AsyncSession, ctx: tools.ToolContext, pending:
         return ctx.messenger.error or "send failed"
     logger.info("Ad first reply sent", extra={"fields": {"conversation_id": str(conversation.id),
                                                          "code": resolved.design.get("code")}})
+    if any(ad_entry.asks_something(m) for m in pending):
+        return None   # she also asked something ("Price", "readymade?"): the agent answers it next
     return "handled"
 
 
