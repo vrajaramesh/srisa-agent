@@ -126,6 +126,8 @@ async def get_conversation(conversation_id: uuid.UUID, request: Request,
 def _image_url(m: Message) -> str | None:
     """Customer photos (WhatsApp media needs a download; Instagram gives a URL) and our own photos."""
     raw = m.raw or {}
+    if m.direction != INBOUND and m.type == "image" and raw.get("image_url"):
+        return raw["image_url"]
     if m.direction != INBOUND and m.type == "image" and (m.text or "").startswith("[photo] http"):
         return m.text[len("[photo] "):]
     for a in ((raw.get("message") or {}).get("attachments") or []):
@@ -135,14 +137,20 @@ def _image_url(m: Message) -> str | None:
 
 
 class StaffReply(BaseModel):
-    text: str = Field(min_length=1, max_length=4000)
+    text: str = Field(default="", max_length=4000)
+    # A photo (public https URL, e.g. uploaded via mybill); text is then its caption.
+    image_url: str | None = Field(default=None, max_length=1000, pattern=r"^https://\S+$")
     staff_name: str | None = Field(default=None, max_length=100)
 
 
 @router.post("/conversations/{conversation_id}/reply")
 async def reply(conversation_id: uuid.UUID, body: StaffReply, request: Request) -> dict[str, Any]:
-    """Send a staff message from the shop's account. The bot stays off for this chat until it's resolved."""
+    """Send a staff message (text, or a photo with an optional caption) from the shop's account.
+    The bot stays off for this chat until it's resolved."""
     await _authorize(request)
+    text = body.text.strip()
+    if not text and not body.image_url:
+        raise HTTPException(status_code=422, detail={"code": "VALIDATION_FAILED", "message": "text or image_url is required"})
     async with get_sessionmaker()() as session, session.begin():
         await repo.lock_conversation(session, conversation_id)
         conversation = await session.get(Conversation, conversation_id)
@@ -154,7 +162,9 @@ async def reply(conversation_id: uuid.UUID, body: StaffReply, request: Request) 
                 "message": "More than 24 hours since the customer's last message: WhatsApp/Instagram only allow a "
                            "reply after she writes again."})
         messenger = WorkerMessenger(session, conversation, author="staff")
-        if not await messenger.send_text(body.text.strip()):
+        sent = (await messenger.send_image(body.image_url, text or None) if body.image_url
+                else await messenger.send_text(text))
+        if not sent:
             raise HTTPException(status_code=502, detail={"code": "SEND_FAILED", "message": messenger.error})
         if not conversation.needs_human:
             conversation.needs_human, conversation.needs_human_reason = True, "staff_reply"

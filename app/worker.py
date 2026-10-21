@@ -80,9 +80,10 @@ class WorkerMessenger:
     async def send_image(self, url: str, caption: str | None) -> bool:
         if self.adapter.image_captions:
             return self._record(await self.adapter.send_image(self._to, url, caption), f"[photo] {caption or url}",
-                                "image", None)
+                                "image", {"image_url": url})
         # Instagram: no captions on images - the caption follows as its own (recorded) text message.
-        if not self._record(await self.adapter.send_image(self._to, url, None), f"[photo] {url}", "image", None):
+        if not self._record(await self.adapter.send_image(self._to, url, None), f"[photo] {url}", "image",
+                            {"image_url": url}):
             return False
         return await self.send_text(caption) if caption else True
 
