@@ -14,6 +14,7 @@ Each reminder is recorded as a bot message with raw.followup = kind (the inbox s
 
 import logging
 import re
+import time
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
@@ -34,7 +35,6 @@ logger = logging.getLogger(__name__)
 ENQUIRY, ENQUIRY_LAST, PAYMENT = "enquiry", "enquiry_last", "payment"
 WINDOW = timedelta(hours=24)
 MARGIN = timedelta(minutes=20)          # don't start a send right at the window's edge
-SCAN_BACK = timedelta(days=4)
 # A clear opt-out anywhere in her last week of messages stops all reminders.
 OPTED_OUT = re.compile(r"(?i)\b(stop|unsubscribe|not interested|no thanks|no thank you|don'?t (message|msg|send|text)"
                        r"|do not (message|msg|send|text)|no need)\b")
@@ -47,6 +47,7 @@ def is_decline(text: str | None) -> bool:
 IST = timezone(timedelta(hours=5, minutes=30))
 DAY_START, DAY_END = 9, 21              # reminders only 09:00-21:00 IST
 JOB_INTERVAL = timedelta(minutes=30)
+RUN_BUDGET_SECONDS = 240                # Cloud Run allows 300 s per request
 EARLIEST = timedelta(hours=12)          # never remind sooner than this after her last message
 DECLINED = re.compile(r"(?i)^\W*(no|nope|not interested|no thanks|no thank you|stop|don'?t|dont|later|"
                       r"nahi|nahin|vaddu|vaddhu|venda|na)\b")
@@ -203,6 +204,24 @@ async def _send_payment(conversation: Conversation, messenger: WorkerMessenger, 
     return "sent" if await messenger.send_text_meta(text, {"followup": PAYMENT, "order_no": order_no}) else "failed"
 
 
+async def _candidates(session, now: datetime) -> list:
+    """One query for the chats that could be due now (the per-chat checks run only for these):
+    her last message 12-24 h ago and we spoke after it (enquiry), or an order created in the last 2 days (payment);
+    always inside the free window and not with the team."""
+    answered = (select(Message.id).where(Message.conversation_id == Conversation.id, Message.direction != INBOUND,
+                                         Message.created_at > Conversation.last_customer_message_at).exists())
+    open_order = (select(OrderDraft.id).where(OrderDraft.conversation_id == Conversation.id,
+                                              OrderDraft.status == DRAFT_SUBMITTED,
+                                              OrderDraft.updated_at >= now - timedelta(days=2)).exists())
+    window_open = Conversation.last_customer_message_at > now - WINDOW + MARGIN
+    stmt = select(Conversation.id).where(
+        Conversation.channel == "whatsapp", Conversation.needs_human.is_(False), window_open,
+        ((Conversation.last_customer_message_at <= now - EARLIEST) & answered
+         & (Conversation.stage != flow.ORDER_CREATED))
+        | ((Conversation.stage == flow.ORDER_CREATED) & open_order))
+    return list((await session.execute(stmt)).scalars().all())
+
+
 async def _claim(session, key: str, kind: str, order_no: str | None = None) -> bool:
     """One attempt per reminder: False if this reminder was already tried (sent or refused by WhatsApp)."""
     return (await session.execute(
@@ -219,14 +238,18 @@ async def run(now: datetime | None = None, dry_run: bool = False) -> dict[str, A
     stats: dict[str, Any] = {"checked": 0, ENQUIRY: 0, ENQUIRY_LAST: 0, PAYMENT: 0, "skipped": 0, "due": []}
     if not settings.followups_enabled:
         return stats
+    if not is_daytime(now):
+        return stats                             # reminders only 09:00-21:00 IST
     mybill = mybill_client.get_client()
     staff = set(settings.staff_alert_number_list)
     async with get_sessionmaker()() as session:
-        ids = list((await session.execute(
-            select(Conversation.id).where(
-                Conversation.channel == "whatsapp", Conversation.needs_human.is_(False),
-                Conversation.last_customer_message_at >= now - SCAN_BACK))).scalars().all())
+        ids = await _candidates(session, now)
+    stats["candidates"] = len(ids)
+    started = time.monotonic()
     for conversation_id in ids:
+        if time.monotonic() - started > RUN_BUDGET_SECONDS:
+            stats["stopped_early"] = True        # the next run (30 min later) continues
+            break
         async with get_sessionmaker()() as session, session.begin():
             await repo.lock_conversation(session, conversation_id)
             conversation = await session.get(Conversation, conversation_id)
