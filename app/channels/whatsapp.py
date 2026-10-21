@@ -41,14 +41,17 @@ class WhatsAppAdapter(ChannelAdapter):
         rows = [{k: c[k] for k in ("id", "title", "description") if c.get(k)} for c in choices]
         return await whatsapp_client.send_list(to, body, button_text, [{"title": section_title or "Options", "rows": rows}])
 
-    async def send_link_button(self, to: str, body: str, button_text: str, url: str) -> SendResult:
-        """Interactive cta_url message."""
+    async def send_link_button(self, to: str, body: str, button_text: str, url: str,
+                               image_url: str | None = None) -> SendResult:
+        """Interactive cta_url message (optionally with a photo header)."""
         payload: dict[str, Any] = {
             "messaging_product": "whatsapp", "to": to, "type": "interactive",
             "interactive": {"type": "cta_url", "body": {"text": whatsapp_client.clip(body, whatsapp_client.INTERACTIVE_BODY)},
                             "action": {"name": "cta_url", "parameters": {
                                 "display_text": whatsapp_client.clip(button_text, whatsapp_client.BUTTON_TITLE),
                                 "url": url}}}}
+        if image_url:
+            payload["interactive"]["header"] = {"type": "image", "image": {"link": image_url}}
         return await whatsapp_client._post_messages(payload, action="send_link_button")
 
     async def mark_seen(self, to: str, message_id: str | None) -> SendResult:

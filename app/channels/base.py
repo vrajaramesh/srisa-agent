@@ -74,7 +74,8 @@ class ChannelAdapter(ABC):
         channel had to fall back to numbered plain text (replies like "2" are then mapped back by the worker)."""
 
     @abstractmethod
-    async def send_link_button(self, to: str, body: str, button_text: str, url: str) -> SendResult: ...
+    async def send_link_button(self, to: str, body: str, button_text: str, url: str,
+                               image_url: str | None = None) -> SendResult: ...
 
     @abstractmethod
     async def mark_seen(self, to: str, message_id: str | None) -> SendResult: ...

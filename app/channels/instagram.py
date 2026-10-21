@@ -369,7 +369,8 @@ class InstagramAdapter(ChannelAdapter):
         return SendResult(ok=fallback.ok, message_id=fallback.message_id, status_code=fallback.status_code,
                           error=fallback.error, data={**fallback.data, "offered": offered, "fallback": "numbered"})
 
-    async def send_link_button(self, to: str, body: str, button_text: str, url: str) -> SendResult:
+    async def send_link_button(self, to: str, body: str, button_text: str, url: str,
+                               image_url: str | None = None) -> SendResult:
         """Button template with a web_url button; on rejection, the link on its own line."""
         if _format_ok("button_template"):
             sent = await self._post({"recipient": {"id": to}, "message": {"attachment": {"type": "template", "payload": {

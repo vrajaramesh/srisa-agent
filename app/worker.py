@@ -103,9 +103,9 @@ class WorkerMessenger:
         title = sections[0].get("title") if sections else None
         return await self._send_choices(body, rows, "list", button_text, title, meta)
 
-    async def send_link_button(self, body: str, button_text: str, url: str) -> bool:
-        return self._record(await self.adapter.send_link_button(self._to, body, button_text, url),
-                            f"{body}\n{url}", "interactive", {"link": url})
+    async def send_link_button(self, body: str, button_text: str, url: str, image_url: str | None = None) -> bool:
+        return self._record(await self.adapter.send_link_button(self._to, body, button_text, url, image_url),
+                            f"{body}\n{url}", "interactive", {"link": url, **({"image_url": image_url} if image_url else {})})
 
 
 class WorkerStore:
