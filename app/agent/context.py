@@ -10,6 +10,8 @@ from app.models import INBOUND, Conversation, Message
 
 PROMPT_PATH = Path(__file__).parent / "prompts" / "system.md"
 IST = ZoneInfo("Asia/Kolkata")
+UNANSWERED_NOTE = ("[Note: the customer's last message(s) above arrived before your replies above reached her. "
+                   "Answer anything in them that your replies did not already cover.]")
 
 # Non-text messages are described to the model in words until vision is added.
 PLACEHOLDERS = {
@@ -132,4 +134,8 @@ def build_messages(history: list[Message]) -> list[dict[str, Any]]:
             turns[-1]["content"] += "\n" + text
         elif turns or role == "user":
             turns.append({"role": role, "content": text})
+    if turns and turns[-1]["role"] == "assistant":
+        # Her latest message arrived while we were still replying (e.g. a second message right after an ad
+        # tap), so our replies are stored after it. The model must see a final user turn.
+        turns.append({"role": "user", "content": UNANSWERED_NOTE})
     return turns
