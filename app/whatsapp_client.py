@@ -191,6 +191,32 @@ async def send_auth_code(to: str, name: str, language: str, code: str) -> SendRe
     return await _post_messages(payload, action="send_auth_code")
 
 
+MAX_MEDIA_BYTES = 16 * 1024 * 1024
+
+
+async def download_media(media_id: str) -> tuple[bytes, str] | None:
+    """A customer's photo/video/document from WhatsApp (Meta keeps media ~30 days): (bytes, mime type),
+    or None if it's gone or too large. Both requests need the access token."""
+    settings = get_settings()
+    headers = {"Authorization": f"Bearer {settings.wa_access_token.get_secret_value()}"}
+    client = _get_client()
+    try:
+        meta = await client.get(f"https://graph.facebook.com/{settings.graph_api_version}/{media_id}", headers=headers)
+        if meta.status_code != 200:
+            logger.warning("WhatsApp media lookup failed", extra={"fields": {"status": meta.status_code}})
+            return None
+        info = meta.json()
+        if int(info.get("file_size") or 0) > MAX_MEDIA_BYTES:
+            return None
+        resp = await client.get(info["url"], headers=headers)
+        if resp.status_code != 200 or len(resp.content) > MAX_MEDIA_BYTES:
+            return None
+        return resp.content, info.get("mime_type") or resp.headers.get("content-type") or "application/octet-stream"
+    except (httpx.HTTPError, KeyError, ValueError) as exc:
+        logger.warning("WhatsApp media download failed", extra={"fields": {"error": repr(exc)[:200]}})
+        return None
+
+
 async def mark_as_read(message_id: str) -> SendResult:
     """Mark an incoming message as read (customer sees blue ticks)."""
     payload = {"messaging_product": "whatsapp", "status": "read", "message_id": message_id}

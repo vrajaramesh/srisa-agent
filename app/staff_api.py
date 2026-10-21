@@ -9,12 +9,13 @@ import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
-from fastapi import APIRouter, HTTPException, Query, Request
+from fastapi import APIRouter, HTTPException, Query, Request, Response
 from fastapi.concurrency import run_in_threadpool
 from pydantic import BaseModel, Field
 from sqlalchemy import and_, func, select
 
 from app import repositories as repo
+from app import whatsapp_client
 from app.config import get_settings
 from app.db import get_sessionmaker
 from app.models import INBOUND, Conversation, Message
@@ -117,10 +118,49 @@ async def get_conversation(conversation_id: uuid.UUID, request: Request,
         waiting = await _waiting_counts(session, [conversation_id])
         messages = [{"id": str(m.id), "direction": m.direction,
                      "author": m.author or ("customer" if m.direction == INBOUND else "bot"),
-                     "type": m.type, "text": m.text, "status": m.status, "at": m.created_at,
-                     "image_url": _image_url(m)} for m in reversed(rows)]
+                     "type": m.type, "text": _display_text(m), "status": m.status, "at": m.created_at,
+                     "image_url": _image_url(m), "media": _media_kind(m)} for m in reversed(rows)]
         return {**_summary(conversation, rows[0] if rows else None, waiting.get(conversation_id, 0)),
                 "messages": messages}
+
+
+MEDIA_TYPES = ("image", "sticker", "video", "document", "audio")
+
+
+def _whatsapp_media_id(m: Message) -> str | None:
+    raw = m.raw or {}
+    if m.direction != INBOUND or m.type not in MEDIA_TYPES:
+        return None
+    return (raw.get(m.type) or {}).get("id")
+
+
+def _display_text(m: Message) -> str | None:
+    """Stored text, with WhatsApp's album notice (an "unsupported" message before the photos) made readable."""
+    if m.type == "unsupported" and ((m.raw or {}).get("unsupported") or {}).get("type") == "album":
+        return "📷 Sent a photo album (the photos follow)"
+    return m.text
+
+
+def _media_kind(m: Message) -> str | None:
+    """'image' / 'video' / ... when a customer's WhatsApp media can be fetched via /staff/media/{message_id}."""
+    return m.type if _whatsapp_media_id(m) else None
+
+
+@router.get("/media/{message_id}")
+async def media(message_id: uuid.UUID, request: Request) -> Response:
+    """The customer's photo/video/document, downloaded from WhatsApp for the staff inbox."""
+    await _authorize(request)
+    async with get_sessionmaker()() as session:
+        message = await session.get(Message, message_id)
+    media_id = _whatsapp_media_id(message) if message is not None else None
+    if media_id is None:
+        raise HTTPException(status_code=404, detail="not_found")
+    fetched = await whatsapp_client.download_media(media_id)
+    if fetched is None:
+        raise HTTPException(status_code=410, detail={"code": "MEDIA_GONE",
+                                                     "message": "WhatsApp no longer has this file (kept about 30 days)."})
+    content, mime = fetched
+    return Response(content=content, media_type=mime, headers={"Cache-Control": "private, max-age=86400"})
 
 
 def _image_url(m: Message) -> str | None:
