@@ -19,7 +19,6 @@ from app.webhook_parser import Referral, parse_referral
 logger = logging.getLogger(__name__)
 
 FRESH_START_GAP = timedelta(days=7)
-BUTTON_PROMPT = "Would you like to order this one, see more photos, or check the size guide? 👇"
 # Meta's default ad message ("Hello! Can I get more info on this?"). Some ad taps arrive without a referral;
 # this text still tells us she came from an ad, so we assume the ad that brought the latest chats.
 AD_GREETING = re.compile(r"^\s*(hello|hi)?[!,.\s]*can i (get|have) more info(rmation)? (on|about) this\s*[?.!]*\s*$",
@@ -132,16 +131,19 @@ def buttons(code: str) -> list[dict[str, str]]:
 
 
 async def send_first_reply(ctx: tools.ToolContext, referral: Referral, design: dict[str, Any]) -> bool:
-    """Photo + caption, then the buttons. False if WhatsApp failed (the worker retries)."""
-    text = caption(design, await _size_range(ctx), tools.fabric_price_text(tools.design_fabrics(design)) or None)
-    text = f"{greeting(ctx.conversation)}\n\n{text}"
+    """Photo (short caption), then the details card with the Order / Photos / Size guide buttons under it (no
+    question - an ad visitor gets the details straight away), then the fabric-only offer.
+    False if WhatsApp failed (the worker retries)."""
+    details = caption(design, await _size_range(ctx), tools.fabric_price_text(tools.design_fabrics(design)) or None)
+    hello = greeting(ctx.conversation)
     images = design.get("images") or []
     if images:
-        if not await ctx.messenger.send_image(images[0]["url"], text):
+        short = f"{hello.split(' Here are')[0]} Here's {design['code']} – {format_rupees(design.get('base_price'))} 👇"
+        if not await ctx.messenger.send_image(images[0]["url"], short):
             return False
-        body = BUTTON_PROMPT
+        body = details
     else:
-        body = f"{text}\n\n{BUTTON_PROMPT}"
+        body = f"{hello}\n\n{details}"
     if not await ctx.messenger.send_buttons(body, buttons(design["code"]), {"kind": "ad_entry", "code": design["code"]}):
         return False
     ctx.actions.append({"action": "ad_first_reply", "code": design["code"], "photo": bool(images)})
