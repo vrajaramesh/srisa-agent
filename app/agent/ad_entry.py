@@ -6,6 +6,7 @@ A greeting line is added only if the ad had no welcome_message (she already saw 
 """
 
 import logging
+import re
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
@@ -19,6 +20,21 @@ logger = logging.getLogger(__name__)
 
 FRESH_START_GAP = timedelta(days=7)
 BUTTON_PROMPT = "Would you like to order this one?"
+# Meta's default ad message ("Hello! Can I get more info on this?"). Some ad taps arrive without a referral;
+# this text still tells us she came from an ad, so we assume the ad that brought the latest chats.
+AD_GREETING = re.compile(r"^\s*(hello|hi)?[!,.\s]*can i (get|have) more info(rmation)? (on|about) this\s*[?.!]*\s*$",
+                         re.IGNORECASE)
+INFERRED_AD_WINDOW = timedelta(days=3)
+
+
+def is_ad_greeting(text: str | None) -> bool:
+    return bool(AD_GREETING.match(text or ""))
+
+
+def inferred_referral(entry: Any) -> Referral:
+    """A Referral rebuilt from the newest real ad entry (no click id / welcome text: we didn't get this tap's)."""
+    return Referral(source_id=entry.source_id, source_type=entry.source_type, source_url=entry.source_url,
+                    headline=entry.headline, body=entry.body, media_type=entry.media_type, inferred=True)
 
 
 def referral_of(message: Message) -> Referral | None:

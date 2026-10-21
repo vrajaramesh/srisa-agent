@@ -223,6 +223,8 @@ async def _process(conversation_id: uuid.UUID, background: list[asyncio.Task]) -
                                 store=WorkerStore(session), draft=await repo.open_draft(session, conversation_id))
 
         entry_msg, referral = ad_entry.entry_message(pending)
+        if referral is None and conversation.channel == "whatsapp":
+            entry_msg, referral = await _inferred_ad_entry(session, conversation, pending)
         handoff_msg, ref = (None, None)
         if referral is None and conversation.channel == "whatsapp":
             handoff_msg, ref = ig_handoff.find_ref(pending)
@@ -237,7 +239,7 @@ async def _process(conversation_id: uuid.UUID, background: list[asyncio.Task]) -
             error = None
 
         now = datetime.now(timezone.utc)
-        if not error and referral is not None and messenger.sent and fep.opens_fep(
+        if not error and referral is not None and not referral.inferred and messenger.sent and fep.opens_fep(
                 conversation, ad_entry.message_time(entry_msg), now):
             conversation.fep_expires_at = fep.fep_expiry(now)
             logger.info("Free entry point window opened", extra={"fields": {
@@ -293,6 +295,21 @@ async def _report_event(mybill: Any, event: dict[str, Any]) -> None:
         logger.warning("Marketing event not reported", extra={"fields": {"error": repr(exc)}})
 
 
+async def _inferred_ad_entry(session: AsyncSession, conversation: Conversation,
+                             pending: list[Message]) -> tuple[Message, Any] | tuple[None, None]:
+    """A new chat that opens with Meta's default ad message but no referral (Meta drops it for some taps):
+    treat it as coming from the ad that brought the latest chats (last 3 days). Not reported to mybill."""
+    first = pending[0]
+    if not ad_entry.is_ad_greeting(first.text) or await repo.previous_inbound_at(session, conversation.id, first):
+        return None, None
+    entry = await repo.latest_ad_entry(session, datetime.now(timezone.utc) - ad_entry.INFERRED_AD_WINDOW)
+    if entry is None:
+        return None, None
+    logger.info("Ad entry inferred from greeting", extra={"fields": {
+        "conversation_id": str(conversation.id), "source_id": entry.source_id}})
+    return first, ad_entry.inferred_referral(entry)
+
+
 async def _ad_entry_path(session: AsyncSession, ctx: tools.ToolContext, pending: list[Message], entry_msg: Message,
                          referral: Any, background: list[asyncio.Task]) -> str | None:
     """Chat opened from an ad / post: resolve the design (ad link, ad text, her text), report the conversation,
@@ -301,7 +318,7 @@ async def _ad_entry_path(session: AsyncSession, ctx: tools.ToolContext, pending:
     conversation = ctx.conversation
     resolved = await resolution.resolve_entry(conversation, referral,
                                               [m.text for m in pending if not m.reply_id], ctx.mybill)
-    if entry_msg.attempts == 0 and ctx.mybill is not None:
+    if entry_msg.attempts == 0 and ctx.mybill is not None and not referral.inferred:
         event = ad_entry.marketing_event(conversation, referral, ad_entry.message_time(entry_msg))
         if event:
             background.append(asyncio.create_task(_report_event(ctx.mybill, event)))

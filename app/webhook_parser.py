@@ -47,6 +47,8 @@ class Referral:
     thumbnail_url: str | None = None
     ctwa_clid: str | None = None
     welcome_text: str | None = None
+    # Not from Meta: guessed from Meta's default ad greeting when the referral was missing (see ad_entry).
+    inferred: bool = False
 
     @property
     def is_ad(self) -> bool:

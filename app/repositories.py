@@ -291,6 +291,18 @@ async def record_entry(session: AsyncSession, conversation_id: uuid.UUID, messag
     )
 
 
+async def latest_ad_entry(session: AsyncSession, since: datetime) -> ConversationEntry | None:
+    """The newest real Click-to-WhatsApp ad entry (any conversation) since `since`."""
+    stmt = (
+        select(ConversationEntry)
+        .where(ConversationEntry.source_type == "ad", ConversationEntry.source_id.is_not(None),
+               ConversationEntry.created_at >= since)
+        .order_by(ConversationEntry.created_at.desc())
+        .limit(1)
+    )
+    return (await session.execute(stmt)).scalars().first()
+
+
 async def previous_inbound_at(session: AsyncSession, conversation_id: uuid.UUID, before: Message) -> datetime | None:
     """When the customer last wrote before `before` (None = `before` starts the conversation)."""
     stmt = (
