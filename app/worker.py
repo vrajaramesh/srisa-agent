@@ -331,15 +331,19 @@ async def _ad_entry_path(session: AsyncSession, ctx: tools.ToolContext, pending:
         event = ad_entry.marketing_event(conversation, referral, ad_entry.message_time(entry_msg))
         if event:
             background.append(asyncio.create_task(_report_event(ctx.mybill, event)))
-    if resolved.design is None:
+    if resolved.design is None and resolved.collection is None:
         return None
     previous = await repo.previous_inbound_at(session, conversation.id, entry_msg)
     if not ad_entry.is_fresh_start(previous, entry_msg):
         return None
-    if not await ad_entry.send_first_reply(ctx, referral, resolved.design):
+    if resolved.collection is not None:
+        sent = await ad_entry.send_collection_reply(ctx, resolved.collection)
+    else:
+        sent = await ad_entry.send_first_reply(ctx, referral, resolved.design)
+    if not sent:
         return ctx.messenger.error or "send failed"
     logger.info("Ad first reply sent", extra={"fields": {"conversation_id": str(conversation.id),
-                                                         "code": resolved.design.get("code")}})
+                                                         "code": (resolved.collection or resolved.design).get("code")}})
     if any(ad_entry.asks_something(m) for m in pending):
         return None   # she also asked something ("Price", "readymade?"): the agent answers it next
     return "handled"

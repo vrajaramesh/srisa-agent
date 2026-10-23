@@ -86,7 +86,27 @@ def fabric_product_id(draft: OrderDraft) -> int:
     return int(str(draft.fabric_code).split("-", 1)[1])
 
 
+def goods_lines(draft: OrderDraft) -> list[dict[str, Any]]:
+    """The cart as mybill expects it: item_code or product_id, quantity, size."""
+    out = []
+    for line in draft.lines or []:
+        item: dict[str, Any] = {"quantity": line["quantity"]}
+        if line.get("code"):
+            item["item_code"] = line["code"]
+        else:
+            item["product_id"] = line["product_id"]
+        if line.get("size"):
+            item["size"] = line["size"]
+        out.append(item)
+    return out
+
+
 def quote_request(draft: OrderDraft) -> dict[str, Any]:
+    if flow.is_goods(draft):
+        goods: dict[str, Any] = {"lines": goods_lines(draft)}
+        if draft.pincode:
+            goods["pincode"] = draft.pincode
+        return goods
     if flow.is_fabric(draft):
         fabric: dict[str, Any] = {"product_id": fabric_product_id(draft), "metres": float(draft.fabric_metres)}
         if draft.pincode:
@@ -100,7 +120,9 @@ def quote_request(draft: OrderDraft) -> dict[str, Any]:
 
 
 async def get_quote(mybill: MybillClient, draft: OrderDraft) -> dict[str, Any]:
-    """Fresh mybill price for the draft (garment or fabric)."""
+    """Fresh mybill price for the draft (garment, fabric or goods cart)."""
+    if flow.is_goods(draft):
+        return await mybill.goods_quote(quote_request(draft))
     if flow.is_fabric(draft):
         return await mybill.fabric_quote(quote_request(draft))
     return await mybill.quote(quote_request(draft))
@@ -142,7 +164,7 @@ def order_request(draft: OrderDraft, customer_id: int, channel: str | None = Non
         "idempotency_key": f"{draft.id}:{draft.version}",
     }
     body.pop("pincode", None)   # the delivery address carries it
-    if not flow.is_fabric(draft):
+    if not flow.is_fabric(draft) and not flow.is_goods(draft):
         body["measurements"] = measurements_payload(draft)
     return body
 
@@ -158,6 +180,16 @@ def _metres(value: Any) -> str:
     return f"{float(value):g} m"
 
 
+def goods_line_text(line: dict[str, Any]) -> str:
+    """'🧵 MCS-1B Blue check – 2.5 m × ₹300 = ₹750' / '👗 KUR-3A Kurti – size M × 2 × ₹899 = ₹1,798'."""
+    label = " ".join(p for p in (line.get("item_code") or "", line.get("colour") or line.get("name") or "") if p)
+    qty = float(line["quantity"])
+    if line.get("kind") == "FABRIC":
+        return f"🧵 {label} – {qty:g} m × {format_rupees(line['unit_price'])} = {format_rupees(line['line_total'])}"
+    size = f"size {line['size']} " if line.get("size") else ""
+    return f"👗 {label} – {size}× {qty:g} × {format_rupees(line['unit_price'])} = {format_rupees(line['line_total'])}"
+
+
 def summary_text(draft: OrderDraft, design: dict[str, Any], quote: dict[str, Any], note: str | None = None) -> str:
     """The order summary - every price and date exactly as returned by the mybill quote.
     For a fabric draft `design` is the fabric (name, code, price_per_metre)."""
@@ -171,7 +203,9 @@ def summary_text(draft: OrderDraft, design: dict[str, Any], quote: dict[str, Any
     address = ", ".join(p for p in (draft.delivery_name, draft.address_line1, draft.address_line2, draft.city,
                                     f"{draft.state} {draft.pincode}") if p)
     delivery = format_rupees(b["delivery_charge"]) if float(b["delivery_charge"]) else "Free"
-    if flow.is_fabric(draft):
+    if flow.is_goods(draft):
+        item_lines = [goods_line_text(line) for line in quote.get("lines", [])]
+    elif flow.is_fabric(draft):
         item_lines = [f"🧵 {design.get('name', draft.fabric_code)} ({draft.fabric_code}) – fabric only",
                       f"📏 {_metres(draft.fabric_metres)} × {format_rupees(quote.get('price_per_metre', b['unit_price']))}/m"]
     else:
@@ -292,11 +326,12 @@ async def confirm(conversation: Conversation, draft: OrderDraft | None, confirme
         return ConfirmOutcome("already_submitted", draft.mybill_order_no)
 
     fabric = flow.is_fabric(draft)
-    design = await (fabric_loader(draft.fabric_code) if fabric else design_loader(draft.design_code))
+    goods = flow.is_goods(draft)
+    design = {} if goods else await (fabric_loader(draft.fabric_code) if fabric else design_loader(draft.design_code))
     if version != draft.version or draft.summary_sent_version != draft.version:
         # She confirmed an older summary: show the current one instead of ordering something she didn't see -
         # but only if the order is complete again; otherwise let the agent continue collecting details.
-        groups, by_group, _ = ({}, {}, {}) if fabric else option_maps(design)
+        groups, by_group, _ = ({}, {}, {}) if (fabric or goods) else option_maps(design)
         incomplete = [f for s in (flow.SIZING, flow.CUSTOMISE, flow.ADDRESS)
                       for f in flow.missing_for(s, draft, groups, by_group)]
         if incomplete:
@@ -314,7 +349,8 @@ async def confirm(conversation: Conversation, draft: OrderDraft | None, confirme
             customer_id = (await mybill.upsert_customer(**customer_identity(conversation)))["customer_id"]
             conversation.mybill_customer_id = draft.mybill_customer_id = customer_id
         request = order_request(draft, customer_id, conversation=conversation)
-        order = await (mybill.create_fabric_order(request) if fabric else mybill.create_order(request))
+        order = await (mybill.create_goods_order(request) if goods else
+                       mybill.create_fabric_order(request) if fabric else mybill.create_order(request))
     except MybillUnavailable as exc:
         return ConfirmOutcome("unavailable", detail=str(exc))
     except MybillRejected as exc:

@@ -20,7 +20,7 @@ from app.agent import flow, ig_handoff, orders
 from app.config import get_agent_settings, get_settings
 from app.agent.flow import ADDRESS, BROWSING, CONFIRM, CUSTOMISE, ORDER_CREATED, SIZING
 from app.agent.formatting import format_rupees
-from app.models import DRAFT_CANCELLED, DRAFT_GARMENT, DRAFT_OPEN, Conversation, OrderDraft
+from app.models import DRAFT_CANCELLED, DRAFT_GARMENT, DRAFT_GOODS, DRAFT_OPEN, Conversation, OrderDraft
 from app.mybill_client import MybillClient, MybillNotFound, MybillRejected, MybillUnavailable
 
 logger = logging.getLogger(__name__)
@@ -29,6 +29,8 @@ MAX_PHOTOS = 3
 MAX_LATEST = 6
 MAX_FABRICS = 8
 MAX_FABRIC_CARDS = 3
+MAX_COLLECTION_PHOTOS = 10
+METRE_UNITS = ("m", "meter", "meters", "metre", "metres", "mts", "mtr", "mtrs")
 SHOP_NAME = "srisafabrics.com"
 HANDOFF_MESSAGE = "A member of our team will reply to you here soon."
 FITS = ("SNUG", "REGULAR", "RELAXED")
@@ -595,7 +597,8 @@ async def save_delivery_details(ctx: ToolContext, args: dict[str, Any]) -> dict[
 async def send_order_summary(ctx: ToolContext, args: dict[str, Any]) -> dict[str, Any]:
     if (err := _require_draft(ctx)) is not None:
         return err
-    design = (await _fetch_fabric(ctx, ctx.draft.fabric_code) if flow.is_fabric(ctx.draft)
+    design = ({} if flow.is_goods(ctx.draft) else
+              await _fetch_fabric(ctx, ctx.draft.fabric_code) if flow.is_fabric(ctx.draft)
               else await _fetch_design(ctx, ctx.draft.design_code))
     if "error" in design:
         return design
@@ -621,7 +624,7 @@ def _fabric_brief(fabric: dict[str, Any] | None) -> dict[str, Any] | None:
 def _link_brief(link: dict[str, Any]) -> dict[str, Any]:
     """A design's fabric link (send it with send_fabric_links)."""
     return {"name": link.get("label") or link.get("name") or "Fabric", "price": link.get("price"),
-            "unit": link.get("unit"), "in_stock": link.get("in_stock")}
+            "unit": link.get("unit"), "in_stock": link.get("in_stock"), "product_id": link.get("product_id")}
 
 
 async def _fetch_fabric(ctx: ToolContext, code: str | None) -> dict[str, Any]:
@@ -756,6 +759,187 @@ async def send_fabric_links(ctx: ToolContext, args: dict[str, Any]) -> dict[str,
                     "a fabric order in chat or repeat the URLs."}
 
 
+# ── collections & goods cart (fabric metres / readymade sizes) ─────────────────
+
+def _collection_brief(c: dict[str, Any]) -> dict[str, Any]:
+    """What the model may say about a collection. Stock is only 'in stock' or the sizes in stock (no counts)."""
+    items = []
+    for i in c.get("items") or []:
+        item = {"code": i["item_code"], "colour": i.get("colour"), "name": i.get("product_name"),
+                "price": i.get("price"), "unit": "m" if (i.get("unit") or "").lower() in METRE_UNITS else "piece",
+                "in_stock": bool(i.get("available")) and float(i.get("stock") or 0) > 0,
+                "has_photo": bool(i.get("image_url"))}
+        if i.get("sizes"):
+            item["sizes_in_stock"] = [s["size"] for s in i["sizes"] if float(s["stock"]) > 0]
+        if i.get("ai_instructions"):
+            item["instructions"] = i["ai_instructions"]
+        if item["unit"] == "m":
+            item["max_metres"] = float(i.get("stock") or 0)
+        items.append(item)
+    return {"code": c["code"], "name": c["name"], "type": c["type"], "description": c.get("description"),
+            "instructions": c.get("ai_instructions"), "items": items}
+
+
+async def _load_collection(ctx: ToolContext, code: str | None) -> tuple[dict[str, Any] | None, str | None]:
+    """(collection, the item code she named if `code` was an item) - by collection code or item code."""
+    code = (code or "").strip().upper()
+    if not code or ctx.mybill is None:
+        return None, None
+    try:
+        return await ctx.mybill.get_collection(code), None
+    except MybillNotFound:
+        pass
+    try:
+        item = await ctx.mybill.get_collection_item(code)
+        return await ctx.mybill.get_collection(item["collection"]["code"]), item["item_code"]
+    except MybillNotFound:
+        return None, None
+
+
+async def get_collection(ctx: ToolContext, args: dict[str, Any]) -> dict[str, Any]:
+    if ctx.mybill is None:
+        return _unavailable()
+    try:
+        collection, item_code = await _load_collection(ctx, args.get("code"))
+    except MybillUnavailable:
+        return _unavailable()
+    if collection is None:
+        return {"error": "not_found", "code": args.get("code")}
+    if not collection.get("active", True):
+        return {"error": "not_available", "note": "This collection isn't sold any more; offer other designs or the team."}
+    ctx.conversation.current_collection_code = collection["code"]
+    result = _collection_brief(collection)
+    if item_code:
+        result["she_named_item"] = item_code
+    return result
+
+
+async def send_collection_photos(ctx: ToolContext, args: dict[str, Any]) -> dict[str, Any]:
+    if ctx.mybill is None:
+        return _unavailable()
+    try:
+        collection, _ = await _load_collection(ctx, args.get("code"))
+    except MybillUnavailable:
+        return _unavailable()
+    if collection is None:
+        return {"error": "not_found", "code": args.get("code")}
+    wanted = {str(c).strip().upper() for c in (args.get("item_codes") or []) if str(c).strip()}
+    items = [i for i in collection.get("items") or [] if i.get("image_url") and (not wanted or i["item_code"].upper() in wanted)]
+    sent = 0
+    for i in items[:MAX_COLLECTION_PHOTOS]:
+        unit = "m" if (i.get("unit") or "").lower() in METRE_UNITS else "piece"
+        caption = " · ".join(p for p in (i["item_code"], i.get("colour") or i.get("product_name"),
+                                          f"{format_rupees(i.get('price'))}/{unit}" if i.get("price") is not None else "") if p)
+        if not await ctx.messenger.send_image(i["image_url"], caption):
+            return {"error": "send_failed"}
+        sent += 1
+    if not sent:
+        return {"error": "no_photos"}
+    ctx.conversation.current_collection_code = collection["code"]
+    ctx.actions.append({"action": "collection_photos_sent", "code": collection["code"], "count": sent})
+    return {"sent": sent, "note": "The photos (each captioned with its code) are on her screen. Ask which code(s) she likes."}
+
+
+def _cart_key(line: dict[str, Any]) -> tuple[str, str]:
+    ident = (line.get("code") or f"#{line.get('product_id')}").upper()
+    return ident, (line.get("size") or "").strip().upper()
+
+
+async def _requote_cart(ctx: ToolContext, lines: list[dict[str, Any]]) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
+    """mybill prices and checks the whole cart (stock, sizes, metres). (quote, None) or (None, error result)."""
+    if not lines:
+        return {"lines": [], "breakdown": {"subtotal": 0}}, None
+    request = [{"quantity": l["quantity"], **({"item_code": l["code"]} if l.get("code") else {"product_id": l["product_id"]}),
+                **({"size": l["size"]} if l.get("size") else {})} for l in lines]
+    try:
+        return await ctx.mybill.goods_quote({"lines": request}), None
+    except MybillUnavailable:
+        return None, _unavailable()
+    except MybillRejected as exc:
+        return None, {"error": (exc.code or "rejected").lower(), "message": exc.message, **(exc.details or {}),
+                      "hint": "Tell her simply and offer what is possible (another size, fewer metres/pieces)."}
+
+
+def _cart_view(quote: dict[str, Any]) -> dict[str, Any]:
+    return {"cart": [orders.goods_line_text(l) for l in quote.get("lines", [])],
+            "subtotal": (quote.get("breakdown") or {}).get("subtotal")}
+
+
+async def set_cart_item(ctx: ToolContext, args: dict[str, Any]) -> dict[str, Any]:
+    """Add an item, or change its quantity (0 removes it). One line per item code (+ size for readymade)."""
+    if ctx.mybill is None:
+        return _unavailable()
+    code = str(args.get("code") or "").strip().upper() or None
+    product_id = args.get("product_id")
+    if code and re.fullmatch(r"FAB-?\d{1,9}", code):          # a fabric from search_fabrics: by product id
+        product_id, code = int(re.sub(r"\D", "", code)), None
+    if not code and not isinstance(product_id, int):
+        return {"error": "invalid_input", "detail": "give the item code (e.g. MCS-1B) or product_id"}
+    try:
+        quantity = Decimal(str(args.get("quantity")))
+    except (InvalidOperation, ValueError):
+        return {"error": "invalid_input", "detail": "quantity must be a number (metres for fabric, pieces for readymade)"}
+    size = str(args.get("size") or "").strip() or None
+
+    draft = ctx.draft if ctx.draft is not None and ctx.draft.status == DRAFT_OPEN else None
+    if draft is not None and not flow.is_goods(draft):
+        if ctx.stage != BROWSING and (draft.design_code or draft.fabric_code):
+            return {"error": "stitched_order_in_progress",
+                    "hint": "Ask her to finish or cancel the stitched order first (cancel_order_draft), or place it, then add these."}
+        draft.kind, draft.design_code, draft.fabric_code, draft.fabric_metres, draft.option_ids = DRAFT_GOODS, None, None, None, []
+        draft.lines = []
+    new = {"code": code, "product_id": product_id, "quantity": float(quantity), "size": size}
+    lines = [l for l in (draft.lines if draft else []) if _cart_key(l) != _cart_key(new)]
+    if quantity > 0:
+        lines.append(new)
+    quote, error = await _requote_cart(ctx, lines)
+    if error:
+        return error
+    if draft is None:
+        try:
+            customer = await ctx.mybill.upsert_customer(**orders.customer_identity(ctx.conversation))
+        except (MybillUnavailable, MybillRejected):
+            return _unavailable()
+        draft = await ctx.store.new_draft(ctx.conversation)
+        draft.kind, draft.mybill_customer_id = DRAFT_GOODS, customer["customer_id"]
+        ctx.conversation.mybill_customer_id = customer["customer_id"]
+        ctx.draft = draft
+    draft.lines = [{"code": q.get("item_code"), "product_id": q["product_id"], "quantity": float(q["quantity"]),
+                    "size": q.get("size"), "name": q.get("name"), "colour": q.get("colour"), "kind": q.get("kind"),
+                    "unit": q.get("unit"), "unit_price": q.get("unit_price"), "line_total": q.get("line_total")}
+                   for q in quote["lines"]]
+    flow.touch(draft)
+    if ctx.stage in (BROWSING, ORDER_CREATED, ADDRESS, CONFIRM):
+        flow.set_stage(ctx.conversation, CUSTOMISE)    # the cart; finish_cart moves on (keeps a saved address)
+    ctx.actions.append({"action": "cart_updated", "items": len(draft.lines)})
+    return {"ok": True, **_cart_view(quote),
+            "next": "Ask if she wants anything else (another colour/size). When she's done, call finish_cart."
+                    if draft.lines else "The cart is empty."}
+
+
+async def remove_cart_item(ctx: ToolContext, args: dict[str, Any]) -> dict[str, Any]:
+    return await set_cart_item(ctx, {**args, "quantity": 0})
+
+
+async def finish_cart(ctx: ToolContext, args: dict[str, Any]) -> dict[str, Any]:
+    """Cart done: ask for the address - or, if it is already saved, re-price and go to the summary."""
+    draft = ctx.draft
+    if draft is None or draft.status != DRAFT_OPEN or not flow.is_goods(draft) or not draft.lines:
+        return {"error": "empty_cart", "hint": "Add items with set_cart_item first."}
+    flow.touch(draft)
+    if flow.missing_for(ADDRESS, draft):
+        flow.set_stage(ctx.conversation, ADDRESS)
+        return {"ok": True, "stage": ADDRESS, "next": "Ask for her delivery name and address (save_delivery_details)."}
+    try:
+        draft.last_quote = await orders.get_quote(ctx.mybill, draft)
+    except MybillUnavailable:
+        return _unavailable()
+    except MybillRejected as exc:
+        return {"error": (exc.code or "rejected").lower(), "message": exc.message}
+    flow.set_stage(ctx.conversation, CONFIRM)
+    return {"ok": True, "stage": CONFIRM, "next": "Call send_order_summary now."}
+
+
 def _go_back(target: str) -> Callable[[ToolContext, dict[str, Any]], Awaitable[dict[str, Any]]]:
     async def handler(ctx: ToolContext, args: dict[str, Any]) -> dict[str, Any]:
         if (err := _require_draft(ctx)) is not None:
@@ -874,6 +1058,34 @@ TOOLS: list[Tool] = [
          "'Buy on srisafabrics.com' button. design_code = all fabrics linked to that design (get_design shows "
          "them as fabric_only); fabric_code = one fabric from search_fabrics. She buys on the website.",
          {"type": "object", "properties": {"design_code": _CODE, "fabric_code": _FAB}}, send_fabric_links, SHOPPING),
+    # Collections & goods cart (fabric by the metre, readymade by size)
+    Tool("get_collection",
+         "Look up a fabric or readymade collection (one Instagram post with several items) by its code (e.g. MCS-1) or "
+         "by an item code (e.g. MCS-1B): items with code, colour, price per metre/piece, in stock, sizes in stock "
+         "(readymade), max metres (fabric) and instructions. Use it before saying anything about a collection.",
+         {"type": "object", "properties": {"code": {"type": "string", "description": "Collection or item code, e.g. MCS-1 or MCS-1B."}},
+          "required": ["code"]}, get_collection),
+    Tool("send_collection_photos",
+         "Send her the collection's item photos, each captioned with its code, colour and price (all, or only the given "
+         "item codes). Then ask which code(s) she likes.",
+         {"type": "object", "properties": {"code": {"type": "string"}, "item_codes": {"type": "array", "items": {"type": "string"}}},
+          "required": ["code"]}, send_collection_photos, SHOPPING | frozenset({CUSTOMISE})),
+    Tool("set_cart_item",
+         "Put an item in her cart or change its quantity (0 removes it): code = collection item code (e.g. MCS-1B) or "
+         "FAB-<id> from search_fabrics, or product_id (a design's fabric_only product). quantity = metres for fabric "
+         "(from 1, steps of 0.25) or pieces for readymade; size = one of the item's sizes_in_stock (readymade). Each "
+         "item+size is one line; call once per line. mybill checks stock and sizes.",
+         {"type": "object", "properties": {"code": {"type": "string"}, "product_id": {"type": "integer"},
+          "quantity": {**_NUM, "description": "metres (fabric) or pieces (readymade)"}, "size": {"type": "string"}},
+          "required": ["quantity"]}, set_cart_item, SHOPPING | frozenset({CUSTOMISE, ADDRESS, CONFIRM})),
+    Tool("remove_cart_item",
+         "Remove a line from her cart (item code or product_id, plus size for readymade).",
+         {"type": "object", "properties": {"code": {"type": "string"}, "product_id": {"type": "integer"},
+          "size": {"type": "string"}}}, remove_cart_item, frozenset({CUSTOMISE, ADDRESS, CONFIRM})),
+    Tool("finish_cart",
+         "She has everything she wants in the cart: move on to the delivery address (or straight to the summary if "
+         "the address is already saved).",
+         {"type": "object", "properties": {}}, finish_cart, frozenset({CUSTOMISE})),
     # Sizing
     Tool("send_size_options",
          "Send her a tappable list of our sizes (with bust/waist/hip). Prefer this to typing the chart out.",
@@ -944,6 +1156,7 @@ TOOLS: list[Tool] = [
 # Instagram is for discovery: browsing tools + the WhatsApp order link. Everything else is WhatsApp only.
 INSTAGRAM_TOOLS = frozenset({"get_design", "list_latest_designs", "send_design_photos", "set_current_design",
                              "search_fabrics", "get_fabric", "send_fabric_photos", "send_fabric_links",
+                             "get_collection", "send_collection_photos",
                              "get_size_chart", "request_human_help", "send_whatsapp_order_link"})
 INSTAGRAM_ONLY = frozenset({"send_whatsapp_order_link"})
 

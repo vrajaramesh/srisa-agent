@@ -51,6 +51,7 @@ def facts_block(conversation: Conversation, order: dict[str, Any] | None = None,
         f"{conversation.customer_name or 'unknown'}"
         + (f" (@{conversation.profile_username})" if conversation.profile_username else ""),
         f"- Design she is currently looking at: {conversation.current_product_code or 'none yet'}",
+        f"- Collection she is looking at (fabric / readymade items): {conversation.current_collection_code or 'none'}",
         f"- Order stage: {order.get('stage') or conversation.stage or 'browsing'}",
     ]
     lines += entry_lines(conversation)

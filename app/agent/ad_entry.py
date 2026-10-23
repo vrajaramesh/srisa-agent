@@ -153,6 +153,75 @@ async def send_first_reply(ctx: tools.ToolContext, referral: Referral, design: d
     return True
 
 
+def _unit(item: dict[str, Any]) -> str:
+    return "m" if (item.get("unit") or "").strip().lower() in tools.METRE_UNITS else "piece"
+
+
+def collection_intro(collection: dict[str, Any], hello: str) -> str:
+    """Text before the item photos: what it is, price per metre / piece, how many options, sizes."""
+    items = [i for i in collection.get("items") or [] if i.get("available")]
+    fabric = collection.get("type") == "FABRIC"
+    prices = sorted({float(i["price"]) for i in items if i.get("price") is not None})
+    unit = "m" if fabric else "piece"
+    price = (f"{format_rupees(prices[0])}/{unit}" if len(prices) == 1 else
+             f"from {format_rupees(prices[0])}/{unit}" if prices else "")
+    lines = [hello, "", f"*{collection['name']} ({collection['code']})*"]
+    description = (collection.get("description") or "").strip()
+    if description:
+        lines += ["", description[:500]]
+    lines.append("")
+    if price:
+        lines.append(f"💰 {price}" + (" – minimum 1 m" if fabric else ""))
+    n = len(items)
+    kind = ("colour / design" if n == 1 else "colours / designs") if fabric else ("option" if n == 1 else "options")
+    lines.append(f"🎨 {n} {kind} – each photo shows its code")
+    if not fabric:
+        sizes = []
+        for i in items:
+            for s in i.get("sizes") or []:
+                if float(s["stock"]) > 0 and s["size"] not in sizes:
+                    sizes.append(s["size"])
+        if sizes:
+            lines.append(f"📏 Sizes: {', '.join(sizes[:12])}")
+    lines.append("🚚 Shipped across India")
+    return "\n".join(lines)
+
+
+def item_caption(item: dict[str, Any]) -> str:
+    unit = _unit(item)
+    parts = [item["item_code"], item.get("colour") or item.get("product_name") or ""]
+    if item.get("price") is not None:
+        parts.append(f"{format_rupees(item['price'])}/{unit}")
+    sizes = [s["size"] for s in item.get("sizes") or [] if float(s["stock"]) > 0]
+    if sizes:
+        parts.append("sizes " + ", ".join(sizes))
+    if not item.get("available") or float(item.get("stock") or 0) <= 0:
+        parts.append("sold out")
+    return " · ".join(p for p in parts if p)
+
+
+async def send_collection_reply(ctx: tools.ToolContext, collection: dict[str, Any]) -> bool:
+    """A collection ad / post / code: intro, each item's photo with its code, then how to choose. False if WhatsApp failed."""
+    hello = greeting(ctx.conversation)
+    if not await ctx.messenger.send_text(collection_intro(collection, hello)):
+        return False
+    sent = 0
+    for item in (collection.get("items") or [])[:tools.MAX_COLLECTION_PHOTOS]:
+        if item.get("image_url"):
+            if not await ctx.messenger.send_image(item["image_url"], item_caption(item)):
+                return False
+            sent += 1
+    example = next((i["item_code"] for i in collection.get("items") or [] if i.get("available")), collection["code"] + "A")
+    if collection.get("type") == "FABRIC":
+        ask = f"Which one(s) do you like? 😊 Reply with the code and metres, e.g. *{example} 2.5 m* – you can choose more than one."
+    else:
+        ask = f"Which one(s) would you like? 😊 Reply with the code and your size, e.g. *{example} M* – you can choose more than one."
+    if not await ctx.messenger.send_text(ask):
+        return False
+    ctx.actions.append({"action": "collection_first_reply", "code": collection["code"], "photos": sent})
+    return True
+
+
 async def apply_taps(ctx: tools.ToolContext, pending: list[Message]) -> list[dict[str, Any]]:
     """ad:order:<code> -> start_order, ad:photos:<code> -> send_design_photos. ad:sizes is left to the model
     (get_size_chart): the size picker only works once an order is started. The model continues afterwards."""

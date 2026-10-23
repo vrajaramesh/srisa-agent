@@ -13,7 +13,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from app.models import Conversation
-from app.mybill_client import MybillClient, MybillError
+from app.mybill_client import MybillClient, MybillError, MybillNotFound
 from app.webhook_parser import Referral
 
 logger = logging.getLogger(__name__)
@@ -60,6 +60,31 @@ async def marketing_link(mybill: MybillClient, source_type: str, source_id: str)
     return link
 
 
+_COLLECTION_CODE = re.compile(r"\b([A-Z]{2,6}-\d{1,4}[A-Z]?)\b")
+
+
+def find_collection_codes(text: str | None) -> list[str]:
+    """Collection / item codes like MCS-1 or MCS-1B (upper-cased)."""
+    return [m.upper() for m in _COLLECTION_CODE.findall((text or "").upper())]
+
+
+async def _active_collection(mybill: MybillClient, code: str) -> dict[str, Any] | None:
+    """An active collection by its code or one of its item codes (None if unknown, inactive or mybill is down)."""
+    for path in ("collection", "item"):
+        try:
+            if path == "collection":
+                c = await mybill.get_collection(code)
+            else:
+                c = await mybill.get_collection((await mybill.get_collection_item(code))["collection"]["code"])
+            return c if c.get("active", True) and c.get("items") else None
+        except MybillNotFound:
+            continue
+        except Exception as exc:  # noqa: BLE001 - resolution never raises
+            logger.warning("Collection lookup failed", extra={"fields": {"code": code, "error": repr(exc)[:200]}})
+            return None
+    return None
+
+
 async def _active_design(mybill: MybillClient, code: str) -> dict[str, Any] | None:
     """The design if it exists and is active (mybill returns 404 for inactive designs)."""
     try:
@@ -89,6 +114,7 @@ class EntryResolution:
     method: str                       # ad_link | ad_text | message_text | none
     design: dict[str, Any] | None = None
     label: str | None = None
+    collection: dict[str, Any] | None = None   # a fabric / readymade collection instead of a design
 
 
 async def resolve_entry(conversation: Conversation, referral: Referral, texts: list[str | None],
@@ -104,18 +130,31 @@ async def resolve_entry(conversation: Conversation, referral: Referral, texts: l
             design = await _active_design(mybill, link["design_code"]) if link.get("design_code") else None
             if design:
                 result.method, result.design = AD_LINK, design
-        if result.design is None:
+            elif link.get("collection_code") and (collection := await _active_collection(mybill, link["collection_code"])):
+                result.method, result.collection = AD_LINK, collection
+        if result.design is None and result.collection is None:
             for code in find_design_codes(referral.body) + find_design_codes(referral.headline):
                 if design := await _active_design(mybill, code):
                     result.method, result.design = AD_TEXT, design
                     break
-        if result.design is None:
+        if result.design is None and result.collection is None:
             for code in reversed([c for text in texts for c in find_design_codes(text)]):
                 if design := await _active_design(mybill, code):
                     result.method, result.design = MESSAGE_TEXT, design
                     break
+        if result.design is None and result.collection is None:
+            # "Code: MCS-1" in the ad caption, or a collection / item code she typed
+            for method, text_list in ((AD_TEXT, [referral.body, referral.headline]), (MESSAGE_TEXT, texts)):
+                for code in [c for text in text_list for c in find_collection_codes(text)]:
+                    if collection := await _active_collection(mybill, code):
+                        result.method, result.collection = method, collection
+                        break
+                if result.collection:
+                    break
     if result.design is not None:
         conversation.current_product_code = result.design.get("code")
+    if result.collection is not None:
+        conversation.current_collection_code = result.collection.get("code")
     conversation.entry_resolution = result.method
     conversation.entry_label = result.label
     logger.info("Ad entry resolved", extra={"fields": {

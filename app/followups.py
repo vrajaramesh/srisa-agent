@@ -161,8 +161,18 @@ async def _send_enquiry(conversation: Conversation, messenger: WorkerMessenger, 
             design = await ctx.design(conversation.current_product_code)
         except Exception:  # noqa: BLE001 - fall back to the generic text
             design = None
-    text = enquiry_text(conversation, design, kind == ENQUIRY_LAST)
     meta = {"followup": kind}
+    if design is None and conversation.current_collection_code and ctx.mybill is not None:
+        try:
+            collection = await ctx.mybill.get_collection(conversation.current_collection_code)
+        except Exception:  # noqa: BLE001 - fall back to the generic text
+            collection = None
+        if collection:
+            how = "the code and metres" if collection.get("type") == "FABRIC" else "the code and your size"
+            text = (f"{_hi(conversation)} Just checking – did you like any of the {collection['name']} "
+                    f"({collection['code']})? Reply with {how} and I'll prepare your order.")
+            return await messenger.send_text_meta(text, meta)
+    text = enquiry_text(conversation, design, kind == ENQUIRY_LAST)
     if design is None:
         return await messenger.send_text_meta(text, meta)
     return await messenger.send_buttons(text, enquiry_buttons(design), {**meta, "kind": "followup", "code": design["code"]})

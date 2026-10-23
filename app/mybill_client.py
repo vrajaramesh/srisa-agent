@@ -147,6 +147,22 @@ class MybillClient:
         """DRAFT fabric-only order. Same idempotency rules as create_order."""
         return await self._request("POST", "/api/agent/orders/fabric", json=request)
 
+    async def get_collection(self, code: str) -> dict[str, Any]:
+        """Fabric / readymade collection with its items (codes, colours, prices, stock, sizes, photos, instructions)."""
+        return await self._get(f"/api/agent/collections/{code}")
+
+    async def get_collection_item(self, code: str) -> dict[str, Any]:
+        """One collection item by its code (e.g. MCS-1B), with its collection."""
+        return await self._get(f"/api/agent/collection-items/{code}")
+
+    async def goods_quote(self, request: dict[str, Any]) -> dict[str, Any]:
+        """{lines: [{item_code | product_id, quantity, size}], pincode?} -> priced lines + breakdown (live stock checks)."""
+        return await self._request("POST", "/api/agent/orders/goods/quote", json=request)
+
+    async def create_goods_order(self, request: dict[str, Any]) -> dict[str, Any]:
+        """DRAFT goods order (fabric / readymade lines). Same idempotency rules as create_order."""
+        return await self._request("POST", "/api/agent/orders/goods", json=request)
+
     async def daily_figures(self, day: str) -> dict[str, Any]:
         """One IST day's orders, payments and website sales (YYYY-MM-DD)."""
         return await self._get("/api/agent/reports/daily", params={"date": day})

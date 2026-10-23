@@ -60,10 +60,11 @@ def message_for(event: PaymentEvent) -> str | None:
         amount = f" ({format_rupees(event.amount)})" if event.amount is not None else ""
         eta = _date(event.estimated_delivery_date)
         status = ("Your fabric is being cut and packed 📦" if event.order_type == "FABRIC"
+                  else "Your order is being packed for dispatch 📦" if event.order_type in GOODS_TYPES
                   else "Your outfit is now with our tailor 🧵")
         text = (f"✅ Payment received for order {event.order_no}{amount}. {thanks}"
                 f"{status}" + (f" - estimated delivery {eta}." if eta else "."))
-        if event.exact_measurements_required and event.order_type != "FABRIC":
+        if event.exact_measurements_required and event.order_type not in GOODS_TYPES:
             phone = f" on {event.customer_phone}" if event.customer_phone else ""
             text += f"\n📏 Our tailor will call you{phone} shortly to take your exact measurements."
         return text
@@ -75,6 +76,7 @@ def message_for(event: PaymentEvent) -> str | None:
 
 
 WEBSITE_ORDER_PAID, RESET_CODE = "ecom.order.paid", "ecom.reset_code"
+GOODS_TYPES = ("FABRIC", "READYMADE", "MIXED")       # ready goods: packed and dispatched from stock
 WEBSITE_EVENTS = (WEBSITE_ORDER_PAID, RESET_CODE)
 
 
@@ -137,6 +139,9 @@ async def handle(event: PaymentEvent) -> dict[str, Any]:
                 raise RuntimeError(f"WhatsApp send failed: {messenger.error}")
             logger.info("PAYMENT_EVENT_SENT", extra={"fields": {"event": event.event, "order_no": event.order_no}})
             status = "sent"
+    if event.event == "order.paid" and event.order_type in GOODS_TYPES and status != "duplicate":
+        await staff_alerts.alert_dispatch(event.order_no, event.customer_name, event.customer_phone, event.amount,
+                                          event.items, event.delivery_address)
     if event.event == "order.paid" and event.exact_measurements_required:
         design = " ".join(p for p in (event.design_code, event.design_name) if p) or None
         await staff_alerts.alert_measurement_call(event.order_no, event.customer_name, event.customer_phone,

@@ -55,6 +55,8 @@ class Conversation(Base):
     # browsing | sizing | customise | address | confirm | order_created - changed ONLY by code (agent/flow.py)
     stage: Mapped[str] = mapped_column(Text, server_default=sql_text("'browsing'"))
     current_product_code: Mapped[str | None] = mapped_column(Text)
+    # Fabric / readymade collection she is looking at (e.g. MCS-1), from an ad, post or code.
+    current_collection_code: Mapped[str | None] = mapped_column(Text)
     needs_human: Mapped[bool] = mapped_column(Boolean, server_default=sql_text("false"))
     # mybill-service customers.customer_id (set by start_order). Never shown to the model.
     mybill_customer_id: Mapped[int | None] = mapped_column(Integer)
@@ -193,7 +195,7 @@ class LlmTurn(Base):
 
 
 DRAFT_OPEN, DRAFT_SUBMITTED, DRAFT_CANCELLED = "open", "submitted", "cancelled"
-DRAFT_GARMENT, DRAFT_FABRIC = "garment", "fabric"
+DRAFT_GARMENT, DRAFT_FABRIC, DRAFT_GOODS = "garment", "fabric", "goods"
 
 
 class OrderDraft(Base):
@@ -218,6 +220,8 @@ class OrderDraft(Base):
     kind: Mapped[str] = mapped_column(Text, default=DRAFT_GARMENT, server_default=sql_text("'garment'"))
     fabric_code: Mapped[str | None] = mapped_column(Text)
     fabric_metres: Mapped[float | None] = mapped_column(Numeric(6, 2))
+    # Goods cart (kind "goods"): [{code, product_id, quantity, size, name, colour, kind, unit, unit_price, line_total}]
+    lines: Mapped[list[dict[str, Any]]] = mapped_column(JSONB, default=list, server_default=sql_text("'[]'"))
     design_code: Mapped[str | None] = mapped_column(Text)
     size_code: Mapped[str | None] = mapped_column(Text)
     height_cm: Mapped[float | None] = mapped_column(Numeric(5, 1))
