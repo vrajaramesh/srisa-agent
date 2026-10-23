@@ -956,14 +956,23 @@ def _go_back(target: str) -> Callable[[ToolContext, dict[str, Any]], Awaitable[d
 async def send_whatsapp_order_link(ctx: ToolContext, args: dict[str, Any]) -> dict[str, Any]:
     """Instagram only: orders are placed on WhatsApp. Sends an "Order on WhatsApp" button (wa.me link with a
     pre-typed message carrying the design and a ref code that links her Instagram account to her number)."""
-    code = _code(args.get("design_code")) or ctx.conversation.current_product_code
+    code = (_code(args.get("design_code")) or ctx.conversation.current_product_code
+            or ctx.conversation.current_collection_code)
     design_code = None
     if code:
         design = await _fetch_design(ctx, code)
-        if "error" in design:
-            return design
-        design_code = design["code"]
-        ctx.conversation.current_product_code = design_code
+        if "error" not in design:
+            design_code = design["code"]
+            ctx.conversation.current_product_code = design_code
+        else:   # a collection or item code (e.g. MCS-1, MCS-1B)
+            try:
+                collection, item_code = await _load_collection(ctx, code)
+            except MybillUnavailable:
+                return _unavailable()
+            if collection is None:
+                return design
+            design_code = item_code or collection["code"]
+            ctx.conversation.current_collection_code = collection["code"]
     ref = await ctx.store.create_ref_code(ctx.conversation, design_code)
     settings = get_agent_settings()
     # Short link on our domain (srisafabrics.com/wa/KUR-101/IG-XXXXX -> wa.me with the pre-typed message).
@@ -972,7 +981,7 @@ async def send_whatsapp_order_link(ctx: ToolContext, args: dict[str, Any]) -> di
     url = (ig_handoff.short_link(settings.order_link_base, design_code, ref) if settings.order_link_base
            else ig_handoff.whatsapp_link(settings.whatsapp_order_number, ig_handoff.prefilled_text(design_code, ref)))
     what = f" {design_code}" if design_code else ""
-    body = (f"To order{what}, continue on WhatsApp 👇 Just press Send there and I'll help you with size, options "
+    body = (f"To order{what}, continue on WhatsApp 👇 Just press Send there and I'll help you with size, metres "
             f"and payment.\n{url}")
     if not await ctx.messenger.send_link_button(body, "Order on WhatsApp", url):
         return {"error": "send_failed"}
@@ -1150,7 +1159,8 @@ TOOLS: list[Tool] = [
          "Instagram only. Orders are placed on WhatsApp: when she wants to order or buy, asks how to order, wants a "
          "price for her size, delivery, payment or custom changes, send this 'Order on WhatsApp' button for the "
          "design (ask which design first if it isn't clear). Also use it to resend the link.",
-         {"type": "object", "properties": {"design_code": _CODE}}, send_whatsapp_order_link),
+         {"type": "object", "properties": {"design_code": {"type": "string",
+          "description": "Design code (KUR-101), collection code (MCS-1) or item code (MCS-1B)."}}}, send_whatsapp_order_link),
 ]
 
 # Instagram is for discovery: browsing tools + the WhatsApp order link. Everything else is WhatsApp only.

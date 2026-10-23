@@ -378,22 +378,32 @@ async def _instagram_handoff_path(session: AsyncSession, ctx: tools.ToolContext,
     else:
         logger.info("Unknown or expired Instagram ref", extra={"fields": {"ref": ref}})
     candidates += resolution.find_design_codes(handoff_msg.text)
-    design = None
+    design = collection = None
     for candidate in candidates:
         if ctx.mybill is not None and (design := await resolution._active_design(ctx.mybill, candidate)):
             break
+    if design is None and ctx.mybill is not None:
+        # a collection / item code (e.g. MCS-1 or MCS-1B)
+        for candidate in candidates + resolution.find_collection_codes(handoff_msg.text):
+            if collection := await resolution._active_collection(ctx.mybill, candidate):
+                break
     if design is not None:
         conversation.current_product_code = design.get("code")
+    if collection is not None:
+        conversation.current_collection_code = collection.get("code")
     if valid:
-        conversation.entry_resolution = "ig_handoff" if design is not None else "none"
+        conversation.entry_resolution = "ig_handoff" if (design or collection) is not None else "none"
     logger.info("Instagram handoff", extra={"fields": {"conversation_id": str(conversation.id), "ref": ref,
-                                                        "linked": valid, "code": design.get("code") if design else None}})
-    if design is None:
+                                                        "linked": valid,
+                                                        "code": (design or collection or {}).get("code")}})
+    if design is None and collection is None:
         return None
     previous = await repo.previous_inbound_at(session, conversation.id, handoff_msg)
     if not ad_entry.is_fresh_start(previous, handoff_msg):
         return None
-    if not await ad_entry.send_first_reply(ctx, Referral(welcome_text=None), design):
+    sent = (await ad_entry.send_collection_reply(ctx, collection) if collection is not None
+            else await ad_entry.send_first_reply(ctx, Referral(welcome_text=None), design))
+    if not sent:
         return ctx.messenger.error or "send failed"
     return "handled"
 

@@ -7,6 +7,7 @@ Design: the post's mybill IG_MEDIA link -> "Code: KUR-101" in the post caption -
 """
 
 import logging
+from typing import Any
 import re
 from datetime import datetime, timedelta, timezone
 
@@ -66,6 +67,37 @@ def private_text(username: str | None, design: dict | None, link: str) -> str:
     return f"{intro}\n\nTo order, tap below to message us on WhatsApp 👇 {after}\n{link}"
 
 
+def collection_private_text(username: str | None, collection: dict[str, Any], link: str) -> str:
+    hi = f"Hi @{username}! 😊" if username else "Hi! 😊"
+    items = [i for i in collection.get("items") or [] if i.get("available")]
+    fabric = collection.get("type") == "FABRIC"
+    prices = sorted({float(i["price"]) for i in items if i.get("price") is not None})
+    unit = "m" if fabric else "piece"
+    price = (f" – {format_rupees(prices[0])}/{unit}" if len(prices) == 1 else
+             f" – from {format_rupees(prices[0])}/{unit}" if prices else "")
+    how = "the code(s) and metres" if fabric else "the code(s) and your size"
+    return (f"{hi} Thanks for your interest in {collection['name']} ({collection['code']}){price}, "
+            f"{len(items)} {'colours' if fabric else 'options'} – each photo has its code.\n\n"
+            f"To order, tap below to message us on WhatsApp 👇 Just press Send and tell us {how}.\n{link}")
+
+
+async def _collection(media_id: str | None, comment_text: str | None, caption: str | None) -> dict[str, Any] | None:
+    """The collection a post is about: its Ad & post link, a code in the caption, or a code in the comment."""
+    mybill = mybill_client.get_client()
+    if mybill is None:
+        return None
+    candidates: list[str] = []
+    if media_id:
+        link = await resolution.marketing_link(mybill, "IG_MEDIA", media_id)
+        if link and link.get("collection_code"):
+            candidates.append(link["collection_code"])
+    candidates += resolution.find_collection_codes(caption) + resolution.find_collection_codes(comment_text)
+    for code in candidates:
+        if collection := await resolution._active_collection(mybill, code):
+            return collection
+    return None
+
+
 def public_text(username: str | None, code: str | None) -> str:
     who = f"@{username} " if username else ""
     order = f" Or WhatsApp us at +91 94916 47691 with code {code}." if code else ""
@@ -122,19 +154,26 @@ async def process_comment(comment_id: str) -> str:
             return done("skipped_recent")
 
         design = await _design(row.media_id, row.text)
-        code = design.get("code") if design else None
+        collection = None
+        if design is None:
+            media = await instagram.fetch_media(row.media_id) if row.media_id else None
+            collection = await _collection(row.media_id, row.text, (media or {}).get("caption"))
+        code = design.get("code") if design else (collection.get("code") if collection else None)
         conversation_id = await repo.upsert_conversation_for(session, "instagram", row.from_id, None, None)
         # Hold the conversation lock while sending: the DM's echo is judged under this lock, after we've recorded it.
         await repo.lock_conversation(session, conversation_id)
         conversation = await session.get(Conversation, conversation_id)
         if row.username and not conversation.profile_username:
             conversation.profile_username = row.username
-        if code:
+        if design:
             conversation.current_product_code = code
+        elif collection:
+            conversation.current_collection_code = code
         ref = await repo.create_ref_code(session, row.from_id, code)
         link = (ig_handoff.short_link(settings.order_link_base, code, ref) if settings.order_link_base
                 else ig_handoff.whatsapp_link(settings.whatsapp_order_number, ig_handoff.prefilled_text(code, ref)))
-        text = private_text(row.username, design, link)
+        text = (collection_private_text(row.username, collection, link) if collection
+                else private_text(row.username, design, link))
 
         sent = await instagram.InstagramAdapter().send_private_reply(comment_id, text, button_url=link)
         if not sent.ok:
