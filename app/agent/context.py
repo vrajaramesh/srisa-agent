@@ -121,16 +121,31 @@ def message_text(message: Message) -> str:
     return f"{placeholder[:-1]} with the caption: {caption}]" if caption else placeholder
 
 
+def quoted_id(message: Message) -> str | None:
+    """The id of the message she swiped to reply to (WhatsApp context.id / Instagram reply_to.mid)."""
+    raw = message.raw or {}
+    return (raw.get("context") or {}).get("id") or (raw.get("reply_to") or {}).get("mid")
+
+
+def _short(text: str, limit: int = 200) -> str:
+    text = text.replace("\n", " ").strip()
+    return text if len(text) <= limit else text[:limit] + "…"
+
+
 def build_messages(history: list[Message]) -> list[dict[str, Any]]:
     """Stored history -> alternating user/assistant turns, oldest first.
 
-    Consecutive same-role messages are merged (a customer often sends several short messages),
+    A swipe-reply carries the quoted message (e.g. the photo caption "MCS-1B · … · ₹300/m") so the model knows
+    which item she means. Consecutive same-role messages are merged (a customer often sends several short messages),
     and the conversation must start with the customer, so leading replies are dropped.
     """
+    by_id = {m.external_message_id: m for m in history if m.external_message_id}
     turns: list[dict[str, Any]] = []
     for message in history:
         role = "user" if message.direction == INBOUND else "assistant"
         text = message_text(message)
+        if role == "user" and (quoted := by_id.get(quoted_id(message) or "")) is not None:
+            text = f"[replying to {'her own' if quoted.direction == INBOUND else 'our'} message: {_short(message_text(quoted))}] {text}"
         if turns and turns[-1]["role"] == role:
             turns[-1]["content"] += "\n" + text
         elif turns or role == "user":
