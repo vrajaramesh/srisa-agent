@@ -79,7 +79,7 @@ async def _design(media_id: str | None, comment_text: str | None) -> dict | None
     candidates: list[str] = []
     if media_id:
         link = await resolution.marketing_link(mybill, "IG_MEDIA", media_id)
-        if link:
+        if link and link.get("design_code"):        # collection links are handled separately
             candidates.append(link["design_code"])
         media = await instagram.fetch_media(media_id)
         if code := caption_code((media or {}).get("caption")):

@@ -101,7 +101,7 @@ async def resolve_entry(conversation: Conversation, referral: Referral, texts: l
         link = await marketing_link(mybill, link_type, referral.source_id) if link_type and referral.source_id else None
         if link:
             result.label = link.get("label")
-            design = await _active_design(mybill, link["design_code"])
+            design = await _active_design(mybill, link["design_code"]) if link.get("design_code") else None
             if design:
                 result.method, result.design = AD_LINK, design
         if result.design is None:
