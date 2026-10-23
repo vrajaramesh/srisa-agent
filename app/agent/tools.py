@@ -13,6 +13,7 @@ import re
 import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
 from typing import Any
 
@@ -811,6 +812,13 @@ async def get_collection(ctx: ToolContext, args: dict[str, Any]) -> dict[str, An
     result = _collection_brief(collection)
     if item_code:
         result["she_named_item"] = item_code
+    draft = ctx.draft if ctx.draft is not None and ctx.draft.status == DRAFT_OPEN else None
+    if draft is not None and not flow.is_goods(draft) and ctx.stage not in SHOPPING:
+        if draft.updated_at and datetime.now(timezone.utc) - draft.updated_at > STALE_DRAFT:
+            flow.set_stage(ctx.conversation, BROWSING)   # an old stitched order she left: the cart replaces it
+        else:
+            result["note"] = (f"She also has an unfinished stitched order ({draft.design_code}). If she now wants this "
+                              "collection instead, call cancel_order_draft first, then add the items.")
     return result
 
 
@@ -996,6 +1004,7 @@ _CODE = {"type": "string", "description": "Design code exactly as shown to the c
 _NUM = {"type": "number"}
 _FAB = {"type": "string", "description": "Fabric code exactly as returned by search_fabrics/get_design, e.g. FAB-6223."}
 SHOPPING = frozenset({BROWSING, ORDER_CREATED})
+STALE_DRAFT = timedelta(hours=6)   # a stitched order untouched this long gives way to a collection cart
 
 TOOLS: list[Tool] = [
     # Always available
@@ -1036,7 +1045,7 @@ TOOLS: list[Tool] = [
          "Send her up to 3 photos of a design, captioned with name and price. After calling it just say the photos "
          "are on the way.",
          {"type": "object", "properties": {"code": _CODE, "max_photos": {"type": "integer", "minimum": 1,
-          "maximum": MAX_PHOTOS}}, "required": ["code"]}, send_design_photos, SHOPPING),
+          "maximum": MAX_PHOTOS}}, "required": ["code"]}, send_design_photos),
     Tool("set_current_design",
          "Remember which design she is currently interested in (checked against our catalog).",
          {"type": "object", "properties": {"code": _CODE}, "required": ["code"]}, set_current_design, SHOPPING),
@@ -1061,7 +1070,7 @@ TOOLS: list[Tool] = [
     Tool("send_fabric_photos",
          "Send her up to 3 photos of a fabric (FAB- code), captioned with name and price per metre.",
          {"type": "object", "properties": {"code": _FAB, "max_photos": {"type": "integer", "minimum": 1,
-          "maximum": MAX_PHOTOS}}, "required": ["code"]}, send_fabric_photos, SHOPPING),
+          "maximum": MAX_PHOTOS}}, "required": ["code"]}, send_fabric_photos),
     Tool("send_fabric_links",
          "When she wants only the fabric (not stitched): send the fabric(s) as messages with photo, price and a "
          "'Buy on srisafabrics.com' button. design_code = all fabrics linked to that design (get_design shows "
@@ -1078,7 +1087,7 @@ TOOLS: list[Tool] = [
          "Send her the collection's item photos, each captioned with its code, colour and price (all, or only the given "
          "item codes). Then ask which code(s) she likes.",
          {"type": "object", "properties": {"code": {"type": "string"}, "item_codes": {"type": "array", "items": {"type": "string"}}},
-          "required": ["code"]}, send_collection_photos, SHOPPING | frozenset({CUSTOMISE})),
+          "required": ["code"]}, send_collection_photos),
     Tool("set_cart_item",
          "Put an item in her cart or change its quantity (0 removes it): code = collection item code (e.g. MCS-1B) or "
          "FAB-<id> from search_fabrics, or product_id (a design's fabric_only product). quantity = metres for fabric "
@@ -1086,7 +1095,7 @@ TOOLS: list[Tool] = [
          "item+size is one line; call once per line. mybill checks stock and sizes.",
          {"type": "object", "properties": {"code": {"type": "string"}, "product_id": {"type": "integer"},
           "quantity": {**_NUM, "description": "metres (fabric) or pieces (readymade)"}, "size": {"type": "string"}},
-          "required": ["quantity"]}, set_cart_item, SHOPPING | frozenset({CUSTOMISE, ADDRESS, CONFIRM})),
+          "required": ["quantity"]}, set_cart_item, SHOPPING | frozenset({SIZING, CUSTOMISE, ADDRESS, CONFIRM})),
     Tool("remove_cart_item",
          "Remove a line from her cart (item code or product_id, plus size for readymade).",
          {"type": "object", "properties": {"code": {"type": "string"}, "product_id": {"type": "integer"},
