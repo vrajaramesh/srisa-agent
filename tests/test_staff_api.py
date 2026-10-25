@@ -54,7 +54,7 @@ def test_handover_alert_reply_resolve(client: TestClient, router: respx.MockRout
     say(client, "My lehenga hem is torn 😞")
 
     sent = bodies(graph_api)
-    assert sent[0]["type"] == "text" and sent[0]["to"] == PHONE                    # the bot tells her
+    assert all(b["to"] != PHONE for b in sent)                                     # silent hand-over
     alerts = [b for b in sent if b["to"] in ("919441200001", "919441200002")]
     assert [a["to"] for a in alerts] == ["919441200001", "919441200002"] and alerts[0]["type"] == "text"
     conv_id = run_sql(f"SELECT id FROM {TEST_SCHEMA}.conversations")[0]["id"]
@@ -63,7 +63,7 @@ def test_handover_alert_reply_resolve(client: TestClient, router: respx.MockRout
                                         f"customer and update the order in mybill: https://mybill.test/?chat={conv_id}")
 
     say(client, "Please help, I need it on Sunday")                                 # bot stays silent
-    assert len(fake_llm.calls) == 2 and len(bodies(graph_api)) == 3
+    assert len(fake_llm.calls) == 2 and len(bodies(graph_api)) == 2
 
     waiting = client.get("/staff/conversations", headers=ADMIN).json()
     assert len(waiting) == 1

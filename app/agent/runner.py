@@ -122,10 +122,10 @@ async def run_agent(conversation: Conversation, history: list[Message], ctx: too
                 text = "\n\n".join(b.text.strip() for b in response.content if b.type == "text" and b.text.strip())
                 if response.stop_reason == "max_tokens":
                     result.error, result.fallback = "max_tokens", True
+                elif any(a["action"] == "human_handoff" for a in ctx.actions):
+                    result.replies = []        # silent hand-over: the team is alerted and replies to her themselves
                 elif text:
                     result.replies = [text]
-                elif any(a["action"] == "human_handoff" for a in ctx.actions):
-                    result.replies = [tools.HANDOFF_MESSAGE]
                 else:
                     result.error, result.fallback = "empty_reply", True
                 break

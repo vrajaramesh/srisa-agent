@@ -11,7 +11,7 @@ from httpx import Response
 from app import repositories as repo
 from app.db import get_sessionmaker
 from app.webhook_parser import IncomingMessage
-from app.worker import FALLBACK_REPLY, process_conversation
+from app.worker import process_conversation
 from tests import fake_llm as llm
 from tests.conftest import MYBILL, TEST_SCHEMA, _execute, run_sql, sent_texts
 from tests.test_agent_runner import DESIGN
@@ -76,12 +76,12 @@ async def test_needs_human_stops_replies(graph_api: respx.Route, fake_llm) -> No
 
 
 @pytest.mark.usefixtures("db_ready")
-async def test_llm_failure_sends_fallback_and_hands_over(graph_api: respx.Route, fake_llm) -> None:
+async def test_llm_failure_hands_over_silently(graph_api: respx.Route, fake_llm) -> None:
     conv_id = await _seed("hi")
     fake_llm.script = [llm.timeout_error(), llm.timeout_error()]
     result = await process_conversation(conv_id)
     assert result.processed == 1
-    assert sent_texts(graph_api) == [FALLBACK_REPLY]
+    assert sent_texts(graph_api) == []
     conv = await _conversation()
     assert conv["needs_human"] and conv["needs_human_reason"] == "llm_failure: APITimeoutError"
     assert (await _turns())[0]["error"] == "APITimeoutError"

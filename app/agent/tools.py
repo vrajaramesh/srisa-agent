@@ -33,7 +33,6 @@ MAX_FABRIC_CARDS = 3
 MAX_COLLECTION_PHOTOS = 10
 METRE_UNITS = ("m", "meter", "meters", "metre", "metres", "mts", "mtr", "mtrs")
 SHOP_NAME = "srisafabrics.com"
-HANDOFF_MESSAGE = "A member of our team will reply to you here soon."
 FITS = ("SNUG", "REGULAR", "RELAXED")
 RANGES = {"height_cm": (120, 200), "bust_in": (24, 60), "waist_in": (20, 56), "hip_in": (26, 64)}
 ALWAYS = frozenset({"*"})
@@ -274,8 +273,8 @@ async def request_human_help(ctx: ToolContext, args: dict[str, Any]) -> dict[str
     ctx.actions.append({"action": "human_handoff", "reason": reason})
     logger.warning("HUMAN_HANDOFF", extra={"fields": {
         "conversation_id": str(ctx.conversation.id), "reason": reason, "customer": ctx.conversation.external_user_id}})
-    return {"ok": True, "tell_customer": HANDOFF_MESSAGE,
-            "note": "The team now handles this chat; you will not see her next messages."}
+    return {"ok": True, "note": "The team is alerted and now handles this chat; they reply to her themselves. "
+                                "Write nothing more to her (no 'our team will reply' message) - end your turn without text."}
 
 
 # ── browsing ─────────────────────────────────────────────────────────────────

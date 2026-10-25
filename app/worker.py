@@ -169,7 +169,7 @@ async def process_conversation(conversation_id: uuid.UUID) -> ProcessResult:
 
     - needs_human: messages are stored as skipped and nobody replies (the team has the chat).
     - Confirm tap / "yes" after the summary: code creates the mybill order (no model call).
-    - LLM failure / refusal / limits: the fallback text is sent and the chat is handed to the team.
+    - LLM failure / refusal / limits: the chat is handed to the team (no message to her; staff are alerted).
     - WhatsApp send failure / mybill down during confirmation: messages are marked failed (attempts + 1) and
       failed=True is returned, so Cloud Tasks retries; after MAX_ATTEMPTS they are skipped.
     """
@@ -422,9 +422,9 @@ async def _agent_path(session: AsyncSession, ctx: tools.ToolContext, pending: li
     repo.add_llm_turn(session, conversation.id, agent)
 
     if agent.fallback:
-        logger.error("Agent failed; sending fallback and handing over",
+        logger.error("Agent failed; handing over (no message to the customer)",
                      extra={"fields": {"conversation_id": str(conversation.id), "error": agent.error}})
-    replies = [FALLBACK_REPLY] if agent.fallback else agent.replies
+    replies = [] if agent.fallback else agent.replies   # hand-overs are silent; the team is alerted
 
     for reply in replies:
         if not await ctx.messenger.send_text(reply):

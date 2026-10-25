@@ -137,11 +137,11 @@ async def test_max_tokens_retries_with_more_room(fake_llm, mybill) -> None:
     assert result.replies == ["Done"] and fake_llm.calls[1]["max_tokens"] == 1200
 
 
-async def test_handoff_without_text_uses_handoff_message(fake_llm, mybill) -> None:
+async def test_handoff_is_silent(fake_llm, mybill) -> None:
     conv = conversation()
     fake_llm.script = [llm.tool_use("request_human_help", {"reason": "ready_to_order"}), llm.response()]
     result = await run_agent(conv, [inbound("I want to order")], ctx(conv, mybill), get_settings())
-    assert result.replies == [tools.HANDOFF_MESSAGE]
+    assert result.replies == []
     assert conv.needs_human and conv.needs_human_reason == "ready_to_order"
     assert result.actions == [{"action": "human_handoff", "reason": "ready_to_order"}]
 
