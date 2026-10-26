@@ -14,8 +14,8 @@ from fastapi.concurrency import run_in_threadpool
 from pydantic import BaseModel, Field
 from sqlalchemy import and_, func, select
 
+from app import firms, insights, whatsapp_client
 from app import repositories as repo
-from app import insights, whatsapp_client
 from app.config import get_settings
 from app.db import get_sessionmaker
 from app.models import INBOUND, Conversation, DailyReport, Message
@@ -49,6 +49,7 @@ def _summary(c: Conversation, last: Message | None, waiting: int) -> dict[str, A
         "id": str(c.id), "channel": c.channel, "external_user_id": c.external_user_id,
         "customer_name": c.customer_name, "profile_username": c.profile_username,
         "phone": ("+" + c.external_user_id) if c.channel == "whatsapp" else None,
+        "firm": c.firm or "srisa", "wholesale": firms.get(c.firm).wholesale,
         "needs_human": bool(c.needs_human), "needs_human_reason": c.needs_human_reason,
         "needs_human_since": c.needs_human_since, "stage": c.stage, "current_design": c.current_product_code,
         "mybill_customer_id": c.mybill_customer_id, "last_customer_message_at": c.last_customer_message_at,

@@ -13,7 +13,7 @@ from typing import Any
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app import channels, mybill_client, staff_alerts
+from app import channels, firms, mybill_client, staff_alerts
 from app import repositories as repo
 from app.agent import ad_entry, fep, ig_handoff, orders, resolution, tools
 from app.agent.runner import AgentResult, run_agent
@@ -52,7 +52,7 @@ class WorkerMessenger:
     def __init__(self, session: AsyncSession, conversation: Conversation, adapter: ChannelAdapter | None = None,
                  author: str = "bot") -> None:
         self._session, self._conversation = session, conversation
-        self.adapter = adapter or channels.adapter_for(conversation.channel)
+        self.adapter = adapter or channels.adapter_for(conversation.channel, firms.get(conversation.firm))
         self.author = author
         self.error: str | None = None
         self.sent = 0  # messages successfully sent in this run
@@ -226,7 +226,8 @@ async def _process(conversation_id: uuid.UUID, background: list[asyncio.Task]) -
                     await messenger.adapter.mark_seen(conversation.external_user_id, message.external_message_id)
         map_numbered_replies(conversation, pending)
 
-        mybill = mybill_client.get_client()
+        base = mybill_client.get_client()
+        mybill = mybill_client.FirmClient(base, conversation) if base is not None else None   # the chat's firm
         ctx = tools.ToolContext(conversation=conversation, mybill=mybill, messenger=messenger,
                                 store=WorkerStore(session), draft=await repo.open_draft(session, conversation_id))
 
@@ -236,6 +237,9 @@ async def _process(conversation_id: uuid.UUID, background: list[asyncio.Task]) -
         handoff_msg, ref = (None, None)
         if referral is None and conversation.channel == "whatsapp":
             handoff_msg, ref = ig_handoff.find_ref(pending)
+        # A wholesale code (SLW-1) in the ad / post or her message: the chat belongs to the wholesale firm.
+        firms.detect(conversation, ([referral.body, referral.headline] if referral is not None else [])
+                     + [m.text for m in pending if not m.reply_id])
         error = await _confirmation_path(session, ctx, pending, mybill)
         if error is None and referral is not None:
             error = await _ad_entry_path(session, ctx, pending, entry_msg, referral, background)
@@ -333,6 +337,8 @@ async def _ad_entry_path(session: AsyncSession, ctx: tools.ToolContext, pending:
             background.append(asyncio.create_task(_report_event(ctx.mybill, event)))
     if resolved.design is None and resolved.collection is None:
         return None
+    if firms.get(conversation.firm).wholesale:
+        return None   # wholesale: the AI writes the first reply from the collection's terms (MOQ, prices)
     previous = await repo.previous_inbound_at(session, conversation.id, entry_msg)
     if not ad_entry.is_fresh_start(previous, entry_msg):
         return None
@@ -398,6 +404,8 @@ async def _instagram_handoff_path(session: AsyncSession, ctx: tools.ToolContext,
                                                         "code": (design or collection or {}).get("code")}})
     if design is None and collection is None:
         return None
+    if firms.get(conversation.firm).wholesale:
+        return None   # wholesale: the AI writes the first reply from the collection's terms
     previous = await repo.previous_inbound_at(session, conversation.id, handoff_msg)
     if not ad_entry.is_fresh_start(previous, handoff_msg):
         return None
@@ -450,7 +458,7 @@ async def _fetch_instagram_profile(conversation: Conversation) -> None:
     if conversation.profile_fetched_at is not None:
         return
     conversation.profile_fetched_at = datetime.now(timezone.utc)
-    profile = await instagram.fetch_profile(conversation.external_user_id)
+    profile = await instagram.fetch_profile(conversation.external_user_id, firms.get(conversation.firm))
     if profile:
         conversation.profile_username = profile.get("username")
         if not conversation.customer_name:

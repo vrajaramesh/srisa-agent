@@ -13,7 +13,7 @@ from fastapi.responses import JSONResponse, PlainTextResponse
 from pydantic import BaseModel
 from sqlalchemy.exc import SQLAlchemyError
 
-from app import events, followups, insights, mybill_client, queue, worker, whatsapp_client
+from app import events, firms, followups, insights, mybill_client, queue, worker, whatsapp_client
 from app.channels import instagram
 from app import repositories as repo
 from app.config import get_settings
@@ -183,14 +183,16 @@ async def store_instagram_webhook(payload: dict) -> tuple[list[uuid.UUID], list[
             if inserted:
                 comments.append(inserted)
         for msg in instagram.parse_webhook(payload):
+            firm = firms.for_ig_account(msg.account_id).key   # which of our accounts (SRISA / Srihitha) she wrote to
             if msg.is_echo:
-                conversation_id = await repo.upsert_conversation_for(session, IG_CHANNEL, msg.external_user_id, None, None)
+                conversation_id = await repo.upsert_conversation_for(session, IG_CHANNEL, msg.external_user_id, None,
+                                                                     None, firm)
                 if await repo.record_instagram_echo(session, conversation_id, msg.external_message_id, msg.text, msg.raw):
                     if conversation_id not in echoes:
                         echoes.append(conversation_id)
                 continue
             conversation_id = await repo.upsert_conversation_for(
-                session, IG_CHANNEL, msg.external_user_id, None, _instagram_time(msg.timestamp))
+                session, IG_CHANNEL, msg.external_user_id, None, _instagram_time(msg.timestamp), firm)
             is_allowed = not allowed or msg.external_user_id in allowed
             stored = await repo.insert_inbound(session, conversation_id, msg.external_message_id, msg.type, msg.text,
                                                msg.tapped_id, msg.raw, RECEIVED if is_allowed else SKIPPED)

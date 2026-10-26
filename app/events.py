@@ -13,8 +13,8 @@ from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
+from app import firms, staff_alerts, whatsapp_client
 from app import repositories as repo
-from app import staff_alerts, whatsapp_client
 from app.config import get_settings
 from app.agent.formatting import format_rupees
 from app.db import get_sessionmaker
@@ -40,6 +40,7 @@ class PaymentEvent(BaseModel):
     items: str | None = None
     delivery_address: str | None = None
     code: str | None = None
+    tenant: str | None = None   # mybill firm schema of the order (firm_srisa, firm_srihitha)
 
 
 def _first_name(name: str | None) -> str:
@@ -141,7 +142,7 @@ async def handle(event: PaymentEvent) -> dict[str, Any]:
             status = "sent"
     if event.event == "order.paid" and event.order_type in GOODS_TYPES and status != "duplicate":
         await staff_alerts.alert_dispatch(event.order_no, event.customer_name, event.customer_phone, event.amount,
-                                          event.items, event.delivery_address)
+                                          event.items, event.delivery_address, firm=firms.for_schema(event.tenant))
     if event.event == "order.paid" and event.exact_measurements_required:
         design = " ".join(p for p in (event.design_code, event.design_name) if p) or None
         await staff_alerts.alert_measurement_call(event.order_no, event.customer_name, event.customer_phone,

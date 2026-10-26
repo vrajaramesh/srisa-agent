@@ -17,6 +17,7 @@ from datetime import datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
 from typing import Any
 
+from app import firms
 from app.agent import flow, ig_handoff, orders
 from app.config import get_agent_settings, get_settings
 from app.agent.flow import ADDRESS, BROWSING, CONFIRM, CUSTOMISE, ORDER_CREATED, SIZING
@@ -896,7 +897,10 @@ async def set_cart_item(ctx: ToolContext, args: dict[str, Any]) -> dict[str, Any
         draft.kind, draft.design_code, draft.fabric_code, draft.fabric_metres, draft.option_ids = DRAFT_GOODS, None, None, None, []
         draft.lines = []
     new = {"code": code, "product_id": product_id, "quantity": float(quantity), "size": size}
-    lines = [l for l in (draft.lines if draft else []) if _cart_key(l) != _cart_key(new)]
+    firm = firms.code_firm(ctx.conversation, code) if code else firms.get(firms.DEFAULT)   # product ids: retail fabrics
+    firms.switch(ctx.conversation, firm, f"cart item {code or product_id}")
+    lines = [l for l in (draft.lines if draft else []) if _cart_key(l) != _cart_key(new)
+             and (firms.code_firm(ctx.conversation, l["code"]) if l.get("code") else firms.get(firms.DEFAULT)).key == firm.key]
     if quantity > 0:
         lines.append(new)
     quote, error = await _requote_cart(ctx, lines)
@@ -1004,6 +1008,92 @@ _NUM = {"type": "number"}
 _FAB = {"type": "string", "description": "Fabric code exactly as returned by search_fabrics/get_design, e.g. FAB-6223."}
 SHOPPING = frozenset({BROWSING, ORDER_CREATED})
 STALE_DRAFT = timedelta(hours=6)   # a stitched order untouched this long gives way to a collection cart
+
+
+# ── wholesale (firm with wholesale=True: mybill's wholesale module, never the retail catalog) ──────
+
+WHOLESALE_CODE = re.compile(r"(?i)^SLW-?(\d{1,9})([A-Z]?)$")
+MAX_WHOLESALE_PHOTOS = 6
+
+
+def wholesale_product_code(code: str | None) -> tuple[str, str | None] | None:
+    """SLW-1 -> ("1", None), SLW-1003B -> ("1003", "B") (the letter = the design on that photo)."""
+    m = WHOLESALE_CODE.match((code or "").strip())
+    return (m.group(1), m.group(2).upper() or None) if m else None
+
+
+async def _wholesale(ctx: ToolContext, name: str, args: dict[str, Any]) -> dict[str, Any]:
+    """One mybill wholesale tool call; keeps its context on the chat and tells the team what needs follow-up."""
+    if ctx.mybill is None:
+        return _unavailable()
+    conv = ctx.conversation
+    phone = orders.phone_e164(conv) if (conv.channel or "whatsapp") == "whatsapp" else None
+    try:
+        out = await ctx.mybill.wholesale_tool(name, args, phone, conv.wholesale_context)
+    except MybillUnavailable:
+        return _unavailable()
+    except (MybillRejected, MybillNotFound) as exc:
+        return {"error": "rejected", "detail": str(exc)[:200]}
+    if isinstance(out.get("context"), dict):
+        conv.wholesale_context = out["context"]
+    for note in out.get("attention") or []:
+        from app import staff_alerts
+        name_, contact = staff_alerts.describe(conv)
+        await staff_alerts.send_alert(name_, contact, f"[{firms.get(conv.firm).name} – wholesale] {note}",
+                                      staff_alerts.chat_link(conv))
+        ctx.actions.append({"action": "wholesale_attention", "note": note})
+    return out.get("result") or {}
+
+
+def _wholesale_tool(name: str):
+    async def handler(ctx: ToolContext, args: dict[str, Any]) -> dict[str, Any]:
+        return await _wholesale(ctx, name, args)
+    return handler
+
+
+async def lookup_wholesale_code(ctx: ToolContext, args: dict[str, Any]) -> dict[str, Any]:
+    """SLW-<code> from a post/ad/her message -> the wholesale product (productId for the other tools)."""
+    parsed = wholesale_product_code(args.get("code"))
+    if parsed is None:
+        return {"error": "invalid_code", "hint": "Codes look like SLW-1 or SLW-1B. Otherwise use search_wholesale_products."}
+    if ctx.mybill is None:
+        return _unavailable()
+    try:
+        product = await ctx.mybill.wholesale_product_by_code(parsed[0])
+    except MybillNotFound:
+        return {"error": "not_found", "code": args.get("code"), "hint": "Use search_wholesale_products with her words."}
+    except MybillUnavailable:
+        return _unavailable()
+    ctx.conversation.current_collection_code = str(args.get("code")).strip().upper()
+    ctx.conversation.wholesale_context = {**(ctx.conversation.wholesale_context or {}),
+                                          "productId": product["productId"], "productName": product["name"]}
+    out = {"productId": product["productId"], "name": product["name"], "unit": product.get("unit"),
+           "photos": len(product.get("images") or [])}
+    if parsed[1]:
+        out["design_on_photo"] = parsed[1]
+    return out
+
+
+async def send_wholesale_photos(ctx: ToolContext, args: dict[str, Any]) -> dict[str, Any]:
+    if ctx.mybill is None:
+        return _unavailable()
+    product_id = args.get("productId")
+    if not isinstance(product_id, int):
+        return {"error": "invalid_input", "detail": "productId (from lookup_wholesale_code / search_wholesale_products)"}
+    try:
+        urls = await ctx.mybill.wholesale_images(product_id)
+    except (MybillUnavailable, MybillNotFound):
+        return _unavailable()
+    if not urls:
+        return {"error": "no_photos", "hint": "No photos are saved for this product; describe it from get_wholesale_product."}
+    name = str(args.get("caption") or "").strip()[:100] or None
+    sent = 0
+    for url in urls[:_int(args.get("max_photos"), MAX_WHOLESALE_PHOTOS, 1, MAX_WHOLESALE_PHOTOS)]:
+        if not await ctx.messenger.send_image(url, name if sent == 0 else None):
+            return {"error": "send_failed"}
+        sent += 1
+    return {"sent": sent, "note": "The photos are on her screen."}
+
 
 TOOLS: list[Tool] = [
     # Always available
@@ -1178,22 +1268,76 @@ INSTAGRAM_TOOLS = frozenset({"get_design", "list_latest_designs", "send_design_p
                              "get_size_chart", "request_human_help", "send_whatsapp_order_link"})
 INSTAGRAM_ONLY = frozenset({"send_whatsapp_order_link"})
 
-TOOLS_BY_NAME = {t.name: t for t in TOOLS}
+
+_PID = {"type": "integer", "description": "productId from lookup_wholesale_code / search_wholesale_products"}
+WHOLESALE_TOOL_LIST: list[Tool] = [
+    Tool("lookup_wholesale_code",
+         "A wholesale code from our post / ad / her message (SLW-<product code>, e.g. SLW-1; a letter after it, e.g. "
+         "SLW-1B, is the design on that photo) -> productId, name, unit, number of photos.",
+         {"type": "object", "properties": {"code": {"type": "string"}}, "required": ["code"]}, lookup_wholesale_code),
+    Tool("search_wholesale_products",
+         "Find wholesale products by what she wrote (name, code, fabric, type, colour or design). Empty query = list "
+         "what we sell.", {"type": "object", "properties": {"query": {"type": "string"}}, "required": ["query"]},
+         _wholesale_tool("search_wholesale_products")),
+    Tool("get_wholesale_product",
+         "Full details of one wholesale product: type, fabric, material, description, colours, designs, "
+         "specifications, unit, HSN, GST %. Missing fields mean not available.",
+         {"type": "object", "properties": {"productId": _PID}, "required": ["productId"]},
+         _wholesale_tool("get_wholesale_product")),
+    Tool("get_wholesale_price",
+         "Wholesale price for a quantity from today's quantity slabs: rate per unit (excluding GST), GST %, amounts, "
+         "all slabs and the minimum order quantity. Without quantity: only the slabs.",
+         {"type": "object", "properties": {"productId": _PID, "quantity": {"type": "number"},
+          "unit": {"type": "string", "description": "unit she used, e.g. meters"}}, "required": ["productId"]},
+         _wholesale_tool("get_wholesale_price")),
+    Tool("get_wholesale_stock", "Whether the product is in stock and, with quantity, whether that quantity is available.",
+         {"type": "object", "properties": {"productId": _PID, "quantity": {"type": "number"}}, "required": ["productId"]},
+         _wholesale_tool("get_wholesale_stock")),
+    Tool("get_wholesale_minimum_quantity", "Minimum order quantity of a product and its unit.",
+         {"type": "object", "properties": {"productId": _PID}, "required": ["productId"]},
+         _wholesale_tool("get_wholesale_minimum_quantity")),
+    Tool("get_wholesale_business_profile",
+         "Our wholesale business info: name, address, contact, GSTIN, hours, ordering process, shipping / delivery, "
+         "payment terms and other notes (the owner's instructions). Missing fields mean not available.",
+         {"type": "object", "properties": {}}, _wholesale_tool("get_wholesale_business_profile")),
+    Tool("get_customer_details",
+         "The registered wholesale customer with her phone number, if any (name, business, city, GSTIN); "
+         "linked=false = not registered yet.", {"type": "object", "properties": {}}, _wholesale_tool("get_customer_details")),
+    Tool("create_quotation_draft",
+         "Prepare a quotation. Call ONLY when she asks for a quotation / estimate / to order and the products and "
+         "quantities are clear. Prices come from the slabs automatically. Saves a DRAFT the team reviews and sends; "
+         "if she isn't registered, the team is told to prepare it.",
+         {"type": "object", "properties": {"items": {"type": "array", "minItems": 1, "maxItems": 20, "items": {
+          "type": "object", "properties": {"productId": {"type": "integer"}, "quantity": {"type": "number"}},
+          "required": ["productId", "quantity"]}}, "notes": {"type": "string", "description": "her requirements for the team, e.g. colours"}},
+          "required": ["items"]}, _wholesale_tool("create_quotation_draft")),
+    Tool("send_wholesale_photos", "Send her the photos of a wholesale product (first photo captioned).",
+         {"type": "object", "properties": {"productId": _PID, "caption": {"type": "string"},
+          "max_photos": {"type": "integer", "minimum": 1, "maximum": MAX_WHOLESALE_PHOTOS}}, "required": ["productId"]},
+         send_wholesale_photos),
+]
+WHOLESALE_TOOLS = frozenset(t.name for t in WHOLESALE_TOOL_LIST) | {"request_human_help"}
+
+TOOLS_BY_NAME = {t.name: t for t in TOOLS + WHOLESALE_TOOL_LIST}
 
 
-def allowed(tool: Tool, stage: str, channel: str = "whatsapp") -> bool:
+def allowed(tool: Tool, stage: str, channel: str = "whatsapp", wholesale: bool = False) -> bool:
+    if wholesale:                     # wholesale chats: only the wholesale module's tools (any stage, any channel)
+        return tool.name in WHOLESALE_TOOLS
+    if tool.name in WHOLESALE_TOOLS and tool.name != "request_human_help":
+        return False
     if channel == "instagram":
         return tool.name in INSTAGRAM_TOOLS
     return tool.name not in INSTAGRAM_ONLY and tool.allowed_in(stage)
 
 
-def tools_for_stage(stage: str, channel: str = "whatsapp") -> list[Tool]:
+def tools_for_stage(stage: str, channel: str = "whatsapp", wholesale: bool = False) -> list[Tool]:
     """Tools offered in a stage on a channel, in a fixed order (so each prefix stays identical for caching)."""
-    return [t for t in TOOLS if allowed(t, stage, channel)]
+    return [t for t in TOOLS + WHOLESALE_TOOL_LIST if allowed(t, stage, channel, wholesale)]
 
 
-def tool_definitions(stage: str = BROWSING, channel: str = "whatsapp") -> list[dict[str, Any]]:
-    return [t.definition() for t in tools_for_stage(stage, channel)]
+def tool_definitions(stage: str = BROWSING, channel: str = "whatsapp", wholesale: bool = False) -> list[dict[str, Any]]:
+    return [t.definition() for t in tools_for_stage(stage, channel, wholesale)]
 
 
 async def run_tool(ctx: ToolContext, name: str, args: Any) -> tuple[dict[str, Any], bool, int]:
@@ -1202,7 +1346,7 @@ async def run_tool(ctx: ToolContext, name: str, args: Any) -> tuple[dict[str, An
     tool = TOOLS_BY_NAME.get(name)
     if tool is None:
         result, is_error = {"error": "unknown_tool", "name": name}, True
-    elif not allowed(tool, ctx.stage, ctx.conversation.channel or "whatsapp"):
+    elif not allowed(tool, ctx.stage, ctx.conversation.channel or "whatsapp", firms.get(ctx.conversation.firm).wholesale):
         result, is_error = {"error": "not_allowed_in_stage", "stage": ctx.stage, "tool": name}, True
         if ctx.conversation.channel == "instagram":
             result["hint"] = "On Instagram, orders are placed on WhatsApp: use send_whatsapp_order_link."

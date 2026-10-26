@@ -8,6 +8,7 @@ from typing import Any
 
 import anthropic
 
+from app import firms
 from app.agent import context, tools
 from app.config import AgentSettings
 from app.models import Conversation, Message
@@ -100,7 +101,7 @@ async def run_agent(conversation: Conversation, history: list[Message], ctx: too
     try:
         while True:
             # Tools follow the CURRENT stage (a tool like start_order can move it during this run).
-            response = await _call(client, result, messages=messages, tools=tools.tool_definitions(ctx.stage, ctx.conversation.channel or "whatsapp"), **request)
+            response = await _call(client, result, messages=messages, tools=tools.tool_definitions(ctx.stage, ctx.conversation.channel or "whatsapp", firms.get(ctx.conversation.firm).wholesale), **request)
             _add_usage(result, getattr(response, "usage", None))
             result.stop_reason = response.stop_reason
 

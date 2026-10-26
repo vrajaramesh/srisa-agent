@@ -50,14 +50,16 @@ async def upsert_conversation(session: AsyncSession, channel: str, msg: Incoming
 
 
 async def upsert_conversation_for(session: AsyncSession, channel: str, external_user_id: str, name: str | None,
-                                  customer_message_at: datetime | None) -> uuid.UUID:
-    """Channel-neutral upsert. customer_message_at=None (e.g. an Instagram echo) leaves the last message time."""
+                                  customer_message_at: datetime | None, firm: str | None = None) -> uuid.UUID:
+    """Channel-neutral upsert. customer_message_at=None (e.g. an Instagram echo) leaves the last message time.
+    firm: set on a new chat only (Instagram: the account that received it); WhatsApp chats start as the default."""
     stmt = pg_insert(Conversation).values(
         id=uuid.uuid4(),
         channel=channel,
         external_user_id=external_user_id,
         customer_name=name,
         last_customer_message_at=customer_message_at,
+        **({"firm": firm} if firm else {}),
     )
     stmt = stmt.on_conflict_do_update(
         constraint="uq_conversations_channel_user",

@@ -9,6 +9,7 @@ Webhook shape (from real payloads):
 Echoes (is_echo) are messages the business account sent - by us, or by staff in the Instagram app.
 """
 
+import dataclasses
 import logging
 import re
 import time
@@ -103,7 +104,7 @@ def parse_webhook(payload: dict[str, Any]) -> list[NormalizedInbound]:
     for entry in payload.get("entry") or []:
         for event in (entry or {}).get("messaging") or []:
             if isinstance(event, dict) and (parsed := _parse_event(event)) is not None:
-                out.append(parsed)
+                out.append(dataclasses.replace(parsed, account_id=str((entry or {}).get("id") or "") or None))
     return out
 
 
@@ -133,9 +134,10 @@ def parse_comments(payload: dict[str, Any]) -> list[Comment]:
             if not value.get("id"):
                 continue
             sender = value.get("from") or {}
+            account = str((entry or {}).get("id") or "") or None   # our account the comment is on
             out.append(Comment(comment_id=str(value["id"]), media_id=(value.get("media") or {}).get("id"),
                                from_id=sender.get("id"), username=sender.get("username"), text=value.get("text"),
-                               parent_id=value.get("parent_id"), raw=value))
+                               parent_id=value.get("parent_id"), raw={**value, "_account_id": account}))
     return out
 
 
@@ -250,10 +252,17 @@ def numbered_text(body: str, choices: list[Choice]) -> str:
     return f"{body}\n\n" + "\n".join(lines) + f"\n\nReply {how} 👆"
 
 
-async def fetch_profile(igsid: str) -> dict[str, Any] | None:
+def _account(firm: Any = None) -> tuple[str, str]:
+    """(Instagram account id, token secret) of a firm (None = the default account)."""
+    from app import firms
+    f = firm or firms.get(None)
+    return (f.ig_account_id or get_settings().ig_account_id), f.ig_token_secret
+
+
+async def fetch_profile(igsid: str, firm: Any = None) -> dict[str, Any] | None:
     """{name, username} from the User Profile API, or None (never raises)."""
     settings = get_settings()
-    token = await ig_token.get_token()
+    token = await ig_token.get_token(_account(firm)[1])
     if not token:
         return None
     try:
@@ -269,10 +278,10 @@ async def fetch_profile(igsid: str) -> dict[str, Any] | None:
     return {"name": data.get("name"), "username": data.get("username")}
 
 
-async def fetch_media(media_id: str) -> dict[str, Any] | None:
+async def fetch_media(media_id: str, firm: Any = None) -> dict[str, Any] | None:
     """{caption, permalink} of one of our posts/reels, or None (never raises)."""
     settings = get_settings()
-    token = await ig_token.get_token()
+    token = await ig_token.get_token(_account(firm)[1])
     if not token:
         return None
     try:
@@ -284,10 +293,10 @@ async def fetch_media(media_id: str) -> dict[str, Any] | None:
     return resp.json() if resp.is_success else None
 
 
-async def reply_to_comment(comment_id: str, text: str) -> SendResult:
+async def reply_to_comment(comment_id: str, text: str, firm: Any = None) -> SendResult:
     """Public reply under a comment (links in comments aren't clickable, so keep it short)."""
     settings = get_settings()
-    token = await ig_token.get_token()
+    token = await ig_token.get_token(_account(firm)[1])
     if not token:
         return SendResult(ok=False, error="instagram token unavailable")
     try:
@@ -308,15 +317,19 @@ class InstagramAdapter(ChannelAdapter):
     name = "instagram"
     image_captions = False
 
+    def __init__(self, firm: Any = None) -> None:
+        self.firm = firm   # which business account sends (app.firms.Firm; None = the default account)
+
     def split_text(self, text: str) -> list[str]:
         return split_text_bytes(text)
 
     async def _post(self, body: dict[str, Any], action: str) -> SendResult:
         settings = get_settings()
-        token = await ig_token.get_token()
+        account_id, secret = _account(self.firm)
+        token = await ig_token.get_token(secret)
         if not token:
             return SendResult(ok=False, error="instagram token unavailable")
-        url = f"https://graph.instagram.com/{settings.graph_api_version}/{settings.ig_account_id}/messages"
+        url = f"https://graph.instagram.com/{settings.graph_api_version}/{account_id}/messages"
         try:
             resp = await _get_client().post(url, json=body, headers={"Authorization": f"Bearer {token}"})
         except httpx.HTTPError as exc:

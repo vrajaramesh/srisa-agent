@@ -31,7 +31,7 @@ def is_ad_greeting(text: str | None) -> bool:
 
 
 # The ad's pre-filled order message ("Hi SRISA! I'd like to order FRO-11 🛍️") - the first reply answers it.
-_ORDER_PREFILL = re.compile(r"(?i)\bi'?d like to order\b|\bi want to order\b")
+_ORDER_PREFILL = re.compile(r"(?i)\bi'?d like to order\b|\bi want to order\b|\bwholesale details for\b")
 
 
 def asks_something(message: Message) -> bool:

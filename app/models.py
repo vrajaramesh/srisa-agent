@@ -57,6 +57,9 @@ class Conversation(Base):
     current_product_code: Mapped[str | None] = mapped_column(Text)
     # Fabric / readymade collection she is looking at (e.g. MCS-1), from an ad, post or code.
     current_collection_code: Mapped[str | None] = mapped_column(Text)
+    firm: Mapped[str] = mapped_column(Text, server_default=sql_text("'srisa'"), default="srisa")   # app.firms key
+    # wholesale chats: mybill wholesale tools' context (productId, quantity, last quotation), sent back each call
+    wholesale_context: Mapped[dict[str, Any] | None] = mapped_column(JSONB)
     needs_human: Mapped[bool] = mapped_column(Boolean, server_default=sql_text("false"))
     # mybill-service customers.customer_id (set by start_order). Never shown to the model.
     mybill_customer_id: Mapped[int | None] = mapped_column(Integer)

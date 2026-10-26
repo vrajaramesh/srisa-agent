@@ -79,13 +79,22 @@ def token_provider_from_settings(settings: AgentSettings) -> TokenProvider:
     return google_token_provider(settings.mybill_audience or settings.mybill_base_url)
 
 
+TENANT_HEADER = "X-Agent-Tenant"
+
+
 class MybillClient:
     """The few read-only calls the agent's tools need. All raise MybillNotFound / MybillUnavailable."""
 
-    def __init__(self, base_url: str, token_provider: TokenProvider, http: httpx.AsyncClient) -> None:
+    def __init__(self, base_url: str, token_provider: TokenProvider, http: httpx.AsyncClient,
+                 tenant: str | None = None) -> None:
         self._base = base_url.rstrip("/")
         self._token_provider = token_provider
         self._http = http
+        self.tenant = tenant   # mybill firm schema (X-Agent-Tenant); None = mybill's default firm
+
+    def for_tenant(self, tenant: str | None) -> "MybillClient":
+        """The same client working for another firm (shares the HTTP connection pool)."""
+        return self if tenant == self.tenant else MybillClient(self._base, self._token_provider, self._http, tenant)
 
     async def get_design(self, code: str) -> dict[str, Any]:
         """Design with images and grouped options (snake_case JSON from mybill)."""
@@ -163,6 +172,20 @@ class MybillClient:
         """DRAFT goods order (fabric / readymade lines). Same idempotency rules as create_order."""
         return await self._request("POST", "/api/agent/orders/goods", json=request)
 
+    # Wholesale (the firm's wholesale module: products, price slabs, stock, business profile, quotations)
+    async def wholesale_tool(self, name: str, tool_input: dict[str, Any], phone: str | None,
+                             context: dict[str, Any] | None) -> dict[str, Any]:
+        """Run one of mybill's wholesale assistant tools -> {result, context, attention}."""
+        return await self._request("POST", f"/api/agent/wholesale/tools/{name}",
+                                   json={"input": tool_input, "phone": phone, "context": context or {}})
+
+    async def wholesale_product_by_code(self, code: str) -> dict[str, Any]:
+        """{productId, code, name, unit, images} by product code (posts show SLW-<code>)."""
+        return await self._get(f"/api/agent/wholesale/products/by-code/{code}")
+
+    async def wholesale_images(self, product_id: int) -> list[str]:
+        return (await self._get(f"/api/agent/wholesale/products/{product_id}/images")).get("images") or []
+
     async def daily_figures(self, day: str) -> dict[str, Any]:
         """One IST day's orders, payments and website sales (YYYY-MM-DD)."""
         return await self._get("/api/agent/reports/daily", params={"date": day})
@@ -204,6 +227,8 @@ class MybillClient:
             logger.error("mybill token unavailable", extra={"fields": {"error": repr(exc)}})
             raise MybillUnavailable("token unavailable") from exc
         headers = {"Authorization": f"Bearer {token}"} if token else {}
+        if self.tenant:
+            headers[TENANT_HEADER] = self.tenant
         # GETs are retried once on timeout/connection errors (e.g. mybill cold start); writes are not.
         attempts = 2 if method == "GET" else 1
         for attempt in range(1, attempts + 1):
@@ -261,3 +286,71 @@ async def close_client() -> None:
 def get_client() -> MybillClient | None:
     """The shared client, or None if mybill is not configured (tools then report temporarily_unavailable)."""
     return _client
+
+
+class FirmClient:
+    """The mybill client for one chat: every call goes to the chat's firm (conversation.firm, read on each call).
+
+    Lookups by code first move the chat to the code's firm (SLW-1 -> wholesale), and an ad/post link is looked up
+    in every firm (the firm that has it gets the chat). Order lookups fall back to the other firms."""
+
+    def __init__(self, base: MybillClient, conversation: Any) -> None:
+        self._base = base
+        self._conversation = conversation
+
+    def _client(self) -> MybillClient:
+        from app import firms
+        return self._base.for_tenant(firms.get(self._conversation.firm).schema)
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._client(), name)
+
+    async def _by_code(self, method: str, code: str) -> dict[str, Any]:
+        """Look the code up in its firm (by prefix); the chat moves there only if it is found."""
+        from app import firms
+        current, target = firms.get(self._conversation.firm), firms.code_firm(self._conversation, code)
+        try:
+            found = await getattr(self._base.for_tenant(target.schema), method)(code)
+        except MybillNotFound:
+            if target.key == current.key:
+                raise
+            return await getattr(self._client(), method)(code)
+        firms.switch(self._conversation, target, f"code {code}")
+        return found
+
+    async def get_design(self, code: str) -> dict[str, Any]:
+        return await self._by_code("get_design", code)
+
+    async def get_collection(self, code: str) -> dict[str, Any]:
+        return await self._by_code("get_collection", code)
+
+    async def get_collection_item(self, code: str) -> dict[str, Any]:
+        return await self._by_code("get_collection_item", code)
+
+    async def resolve_marketing_link(self, source_type: str, source_id: str) -> dict[str, Any] | None:
+        from app import firms
+        current = firms.get(self._conversation.firm)
+        for firm in [current] + [f for f in firms.all_firms() if f.key != current.key]:
+            link = await self._base.for_tenant(firm.schema).resolve_marketing_link(source_type, source_id)
+            if link:
+                firms.switch(self._conversation, firm, f"{source_type} link {source_id}")
+                return link
+        return None
+
+    async def _order_call(self, method: str, order_no: str) -> Any:
+        from app import firms
+        current = firms.get(self._conversation.firm)
+        others = [f for f in firms.all_firms() if f.key != current.key]
+        for i, firm in enumerate([current] + others):
+            try:
+                return await getattr(self._base.for_tenant(firm.schema), method)(order_no)
+            except MybillNotFound:
+                if i == len(others):
+                    raise
+        raise MybillNotFound(order_no)
+
+    async def get_order(self, order_no: str) -> dict[str, Any]:
+        return await self._order_call("get_order", order_no)
+
+    async def create_payment_link(self, order_no: str) -> dict[str, Any]:
+        return await self._order_call("create_payment_link", order_no)

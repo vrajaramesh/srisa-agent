@@ -7,7 +7,7 @@ Template "staff_alert" (Utility, id 4408065276072701), used for every staff aler
 
 import logging
 
-from app import whatsapp_client
+from app import firms, whatsapp_client
 from app.config import get_settings
 from app.models import Conversation
 
@@ -32,13 +32,17 @@ def describe(conversation: Conversation) -> tuple[str, str]:
     return name, contact
 
 
+def chat_link(conversation: Conversation) -> str:
+    settings = get_settings()
+    return (f"{settings.mybill_ui_url.rstrip('/')}/?chat={conversation.id}" if settings.mybill_ui_url
+            else "mybill-ui > Boutique > Customer chats")
+
+
 async def alert_staff(conversation: Conversation) -> int:
     """A chat was handed to the team. Returns how many alerts were sent. Never raises."""
-    settings = get_settings()
     name, contact = describe(conversation)
-    reason = "needs help – " + (conversation.needs_human_reason or "unspecified").replace("_", " ")
-    link = (f"{settings.mybill_ui_url.rstrip('/')}/?chat={conversation.id}" if settings.mybill_ui_url
-            else "mybill-ui > Boutique > Customer chats")
+    reason = _tag(firms.get(conversation.firm)) + "needs help – " + (conversation.needs_human_reason or "unspecified").replace("_", " ")
+    link = chat_link(conversation)
     logger.warning("STAFF_NEEDED", extra={"fields": {"conversation_id": str(conversation.id), "reason": reason,
                                                      "channel": conversation.channel}})
     return await send_alert(name, contact, reason, link)
@@ -70,16 +74,21 @@ async def alert_website_order(order_no: str, name: str | None, phone: str | None
 
 
 async def alert_dispatch(order_no: str, name: str | None, phone: str | None, amount: float | None,
-                         items: str | None, address: str | None) -> int:
+                         items: str | None, address: str | None, firm: "firms.Firm | None" = None) -> int:
     """A paid WhatsApp goods order (fabric / readymade): cut or pack it and dispatch."""
     settings = get_settings()
     paid = f" – paid ₹{amount:,.0f}" if amount is not None else ""
-    reason = (f"📦 pack & dispatch WhatsApp order {order_no}{paid}" + (f"\nItems: {items}" if items else "")
+    reason = (f"{_tag(firm)}📦 pack & dispatch WhatsApp order {order_no}{paid}" + (f"\nItems: {items}" if items else "")
               + (f"\nShip to: {address}" if address else ""))
     link = (f"{settings.mybill_ui_url.rstrip('/')}/?order={order_no}" if settings.mybill_ui_url
             else "mybill-ui > Boutique > WhatsApp Orders")
     logger.warning("DISPATCH_NEEDED", extra={"fields": {"order_no": order_no}})
     return await send_alert(name or "Customer", phone or "-", reason, link)
+
+
+def _tag(firm: "firms.Firm | None") -> str:
+    """Wholesale (Srihitha) alerts say so first: the team handles them in that firm's mybill login."""
+    return f"[{firm.name} – wholesale] " if firm is not None and firm.wholesale else ""
 
 
 def alert_text(name: str, contact: str, reason: str, link: str) -> str:

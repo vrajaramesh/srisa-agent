@@ -13,7 +13,7 @@ from datetime import datetime, timedelta, timezone
 
 from sqlalchemy import select
 
-from app import mybill_client
+from app import firms, mybill_client
 from app import repositories as repo
 from app.agent import ig_handoff, resolution
 from app.agent.formatting import format_rupees
@@ -53,6 +53,13 @@ def caption_code(caption: str | None) -> str | None:
     return codes[0] if codes else None
 
 
+def wholesale_private_text(username: str | None, firm_name: str, code: str | None, link: str) -> str:
+    hi = f"Hi @{username}! 😊" if username else "Hi! 😊"
+    about = f" in {code}" if code else ""
+    return (f"{hi} Thanks for your interest{about} – {firm_name} wholesale.\n\nFor prices, minimum quantity and "
+            f"availability, tap below to message us on WhatsApp 👇 Just press Send there.\n{link}")
+
+
 def private_text(username: str | None, design: dict | None, link: str) -> str:
     hi = f"Hi @{username}! 😊" if username else "Hi! 😊"
     if design:
@@ -81,9 +88,16 @@ def collection_private_text(username: str | None, collection: dict[str, Any], li
             f"To order, tap below to message us on WhatsApp 👇 Just press Send and tell us {how}.\n{link}")
 
 
-async def _collection(media_id: str | None, comment_text: str | None, caption: str | None) -> dict[str, Any] | None:
+def _mybill(firm: Any) -> Any:
+    """mybill for the firm whose Instagram account has the post."""
+    base = mybill_client.get_client()
+    return base.for_tenant(firm.schema) if base is not None else None
+
+
+async def _collection(media_id: str | None, comment_text: str | None, caption: str | None,
+                      firm: Any = None) -> dict[str, Any] | None:
     """The collection a post is about: its Ad & post link, a code in the caption, or a code in the comment."""
-    mybill = mybill_client.get_client()
+    mybill = _mybill(firm or firms.get(None))
     if mybill is None:
         return None
     candidates: list[str] = []
@@ -104,8 +118,10 @@ def public_text(username: str | None, code: str | None) -> str:
     return f"{who}Thank you 💜 We've sent you the details in a DM.{order}"
 
 
-async def _design(media_id: str | None, comment_text: str | None) -> dict | None:
-    mybill = mybill_client.get_client()
+async def _design(media_id: str | None, comment_text: str | None, firm: Any = None) -> dict | None:
+    if firm is not None and firm.wholesale:
+        return None                               # the wholesale firm sells collections only
+    mybill = _mybill(firm or firms.get(None))
     if mybill is None:
         return None
     candidates: list[str] = []
@@ -113,7 +129,7 @@ async def _design(media_id: str | None, comment_text: str | None) -> dict | None
         link = await resolution.marketing_link(mybill, "IG_MEDIA", media_id)
         if link and link.get("design_code"):        # collection links are handled separately
             candidates.append(link["design_code"])
-        media = await instagram.fetch_media(media_id)
+        media = await instagram.fetch_media(media_id, firm)
         if code := caption_code((media or {}).get("caption")):
             candidates.append(code)
     candidates += resolution.find_design_codes(comment_text)
@@ -138,7 +154,8 @@ async def process_comment(comment_id: str) -> str:
             logger.info("Instagram comment", extra={"fields": {"comment_id": comment_id, "outcome": outcome}})
             return outcome
 
-        if not row.from_id or row.from_id == settings.ig_account_id:
+        firm = firms.for_ig_account((row.raw or {}).get("_account_id"))   # the account the post is on
+        if not row.from_id or row.from_id == settings.ig_account_id or row.from_id in firms.ig_account_ids():
             return done("skipped_own")
         allowed = settings.allowed_ig_sender_set
         if allowed and row.from_id not in allowed:
@@ -153,13 +170,18 @@ async def process_comment(comment_id: str) -> str:
         if recent:
             return done("skipped_recent")
 
-        design = await _design(row.media_id, row.text)
-        collection = None
-        if design is None:
-            media = await instagram.fetch_media(row.media_id) if row.media_id else None
-            collection = await _collection(row.media_id, row.text, (media or {}).get("caption"))
-        code = design.get("code") if design else (collection.get("code") if collection else None)
-        conversation_id = await repo.upsert_conversation_for(session, "instagram", row.from_id, None, None)
+        design = collection = None
+        if firm.wholesale:            # wholesale posts: the SLW code in the caption / comment (wholesale module data)
+            media = await instagram.fetch_media(row.media_id, firm) if row.media_id else None
+            found = firms.wholesale_code_in([(media or {}).get("caption"), row.text])
+            code = found[1] if found else None
+        else:
+            design = await _design(row.media_id, row.text, firm)
+            if design is None:
+                media = await instagram.fetch_media(row.media_id, firm) if row.media_id else None
+                collection = await _collection(row.media_id, row.text, (media or {}).get("caption"), firm)
+            code = design.get("code") if design else (collection.get("code") if collection else None)
+        conversation_id = await repo.upsert_conversation_for(session, "instagram", row.from_id, None, None, firm.key)
         # Hold the conversation lock while sending: the DM's echo is judged under this lock, after we've recorded it.
         await repo.lock_conversation(session, conversation_id)
         conversation = await session.get(Conversation, conversation_id)
@@ -167,20 +189,21 @@ async def process_comment(comment_id: str) -> str:
             conversation.profile_username = row.username
         if design:
             conversation.current_product_code = code
-        elif collection:
+        elif collection or (firm.wholesale and code):
             conversation.current_collection_code = code
         ref = await repo.create_ref_code(session, row.from_id, code)
         link = (ig_handoff.short_link(settings.order_link_base, code, ref) if settings.order_link_base
                 else ig_handoff.whatsapp_link(settings.whatsapp_order_number, ig_handoff.prefilled_text(code, ref)))
-        text = (collection_private_text(row.username, collection, link) if collection
+        text = (wholesale_private_text(row.username, firm.name, code, link) if firm.wholesale
+                else collection_private_text(row.username, collection, link) if collection
                 else private_text(row.username, design, link))
 
-        sent = await instagram.InstagramAdapter().send_private_reply(comment_id, text, button_url=link)
+        sent = await instagram.InstagramAdapter(firm).send_private_reply(comment_id, text, button_url=link)
         if not sent.ok:
             return done(FAILED, sent.error)
         repo.add_outbound_message(session, conversation_id, text, sent.message_id, {**(sent.data or {}),
                                   "private_reply_to_comment": comment_id}, author="bot")
         row.private_reply_mid, row.design_code = sent.message_id, code
-        public = await instagram.reply_to_comment(comment_id, public_text(row.username, code))
+        public = await instagram.reply_to_comment(comment_id, public_text(row.username, code), firm)
         row.public_reply_id = public.message_id if public.ok else None
         return done(REPLIED, None if public.ok else f"public reply: {public.error}")

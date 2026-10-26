@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo
 
+from app import firms
 from app.models import INBOUND, Conversation, Message
 
 PROMPT_PATH = Path(__file__).parent / "prompts" / "system.md"
@@ -44,14 +45,26 @@ def facts_block(conversation: Conversation, order: dict[str, Any] | None = None,
     today = (now or datetime.now(IST)).astimezone(IST)
     order = order or {}
     channel = conversation.channel or "whatsapp"
+    firm = firms.get(conversation.firm)
     lines = [
         "Conversation facts (from our system, not from the customer):",
         f"- Channel: {channel}",
+        f"- Business for this chat: {firm.name} ({firm.about})"
+        + (" - WHOLESALE: follow the Wholesale rules" if firm.wholesale else ""),
         f"- Customer name ({'Instagram' if channel == 'instagram' else 'WhatsApp'} profile): "
         f"{conversation.customer_name or 'unknown'}"
         + (f" (@{conversation.profile_username})" if conversation.profile_username else ""),
-        f"- Design she is currently looking at: {conversation.current_product_code or 'none yet'}",
-        f"- Collection she is looking at (fabric / readymade items): {conversation.current_collection_code or 'none'}",
+    ]
+    if firm.wholesale:
+        product = (conversation.wholesale_context or {}).get("productName")
+        lines += [f"- Wholesale code she asked about: {conversation.current_collection_code or 'none'}"
+                  + (f" (product: {product})" if product else "")]
+    else:
+        lines += [
+            f"- Design she is currently looking at: {conversation.current_product_code or 'none yet'}",
+            f"- Collection she is looking at (fabric / readymade items): {conversation.current_collection_code or 'none'}",
+        ]
+    lines += [
         f"- Order stage: {order.get('stage') or conversation.stage or 'browsing'}",
     ]
     lines += entry_lines(conversation)

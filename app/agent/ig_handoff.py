@@ -27,6 +27,10 @@ def ref_expiry(now: datetime | None = None) -> datetime:
 
 
 def prefilled_text(design_code: str | None, ref: str) -> str:
+    from app import firms
+    firm = firms.for_code(design_code)
+    if firm is not None and firm.wholesale:           # same number, wholesale wording (matches the /wa short link)
+        return f"Hi {firm.name}! I'd like wholesale details for {design_code} 🧵 (ref {ref})"
     what = f"order {design_code}" if design_code else "place an order"
     return f"Hi SRISA! I'd like to {what} 🛍️ (ref {ref})"
 

@@ -42,6 +42,13 @@ class AgentSettings(BaseSettings):
     # The shop website: a design's fabrics are sold there ({shop_url}/?fabrics=FRO-11 lists them all).
     shop_url: str = "https://srisafabrics.com"
 
+    # Firms served by this agent (app.firms): mybill tenant schemas, and the collection-code prefixes of the wholesale firm.
+    srisa_tenant_schema: str = "firm_srisa"
+    srihitha_tenant_schema: str = "firm_srihitha"
+    srihitha_code_prefixes: str = "SLW"
+    # srihitha_looms_world Instagram professional account id; its token is the IG_ACCESS_TOKEN_SRIHITHA secret. Empty = not connected.
+    srihitha_ig_account_id: str = ""
+
     # mybill-service /api/agent/** (read-only catalog for the agent's tools).
     mybill_base_url: str = ""  # e.g. https://mybill-service-276371417285.us-central1.run.app
     mybill_audience: str = ""  # ID-token audience; defaults to mybill_base_url

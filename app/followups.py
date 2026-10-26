@@ -263,17 +263,18 @@ async def run(now: datetime | None = None, dry_run: bool = False) -> dict[str, A
         async with get_sessionmaker()() as session, session.begin():
             await repo.lock_conversation(session, conversation_id)
             conversation = await session.get(Conversation, conversation_id)
+            chat_mybill = mybill_client.FirmClient(mybill, conversation) if mybill is not None else None
             if conversation is None or conversation.needs_human or conversation.external_user_id in staff:
                 continue
             stats["checked"] += 1
             if not in_free_window(conversation, now):
                 continue
             messenger = WorkerMessenger(session, conversation)
-            ctx = tools.ToolContext(conversation=conversation, mybill=mybill, messenger=messenger,
+            ctx = tools.ToolContext(conversation=conversation, mybill=chat_mybill, messenger=messenger,
                                     store=WorkerStore(session), draft=None)
             draft = await _payment(session, conversation, now, settings)
             if dry_run:
-                kind = PAYMENT if draft is not None else await _enquiry(session, conversation, now, mybill, settings)
+                kind = PAYMENT if draft is not None else await _enquiry(session, conversation, now, chat_mybill, settings)
                 if kind:
                     stats["due"].append({"customer": conversation.customer_name, "kind": kind,
                                          "design": conversation.current_product_code,
@@ -284,14 +285,14 @@ async def run(now: datetime | None = None, dry_run: bool = False) -> dict[str, A
                 n = await _followups_sent(session, conversation_id, (PAYMENT,), draft.updated_at)
                 if not await _claim(session, f"followup:{PAYMENT}:{draft.mybill_order_no}:{n}", PAYMENT, draft.mybill_order_no):
                     continue
-                outcome = await _send_payment(conversation, messenger, mybill, draft)
+                outcome = await _send_payment(conversation, messenger, chat_mybill, draft)
                 if outcome == "sent":
                     stats[PAYMENT] += 1
                     logger.info("FOLLOWUP_SENT", extra={"fields": {"kind": PAYMENT, "conversation_id": str(conversation_id)}})
                 elif outcome == "failed":
                     stats["skipped"] += 1
                 continue
-            kind = await _enquiry(session, conversation, now, mybill, settings)
+            kind = await _enquiry(session, conversation, now, chat_mybill, settings)
             if kind is None:
                 continue
             key = f"followup:{kind}:{conversation_id}:{conversation.last_customer_message_at.isoformat()}"

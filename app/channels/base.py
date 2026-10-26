@@ -46,6 +46,7 @@ class NormalizedInbound:
     referral: Referral | None = None
     is_echo: bool = False          # sent by the business account (by us, or by staff in the app)
     profile_name: str | None = None
+    account_id: str | None = None  # Instagram: our business account that received it (which firm)
     raw: dict[str, Any] = field(default_factory=dict, compare=False, repr=False)
 
 

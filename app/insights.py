@@ -18,7 +18,7 @@ import anthropic
 from sqlalchemy import func, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
-from app import mybill_client
+from app import firms, mybill_client
 from app.config import get_settings
 from app.db import get_sessionmaker
 from app.models import INBOUND, Conversation, DailyReport, InstagramComment, Message
@@ -166,7 +166,7 @@ async def collect(day: date) -> tuple[dict[str, Any], str, int]:
         c = conversations[conv_id]
         source = ("Instagram ad" if c.entry_source_type == "ad" else
                   "Instagram post" if c.entry_source_type == "post" else "direct")
-        head = (f"## Chat {conv_id} | {c.channel} | {c.customer_name or c.profile_username or 'customer'} | "
+        head = (f"## Chat {conv_id} | {c.channel} | business: {firms.get(c.firm).name} | {c.customer_name or c.profile_username or 'customer'} | "
                 f"source: {source} | design: {c.current_product_code or '-'} | stage: {c.stage} | "
                 f"with team: {'yes' if c.needs_human else 'no'}")
         shown = ms[-MAX_MESSAGES_PER_CHAT:]
