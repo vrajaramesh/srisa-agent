@@ -68,6 +68,8 @@ class Conversation(Base):
     # When it was handed to the team (set/cleared automatically when needs_human changes; staff inbox order).
     needs_human_since: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     last_customer_message_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # Removed from Customer chats by staff: hidden, no AI reminders, until her next message (see is_visible()).
+    dismissed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     # Newest Click-to-WhatsApp ad / post referral (history in conversation_entries). source_type "ad" | "post".
     entry_source_type: Mapped[str | None] = mapped_column(Text)
     entry_source_id: Mapped[str | None] = mapped_column(Text)
@@ -88,6 +90,11 @@ class Conversation(Base):
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
     )
+
+
+def is_visible():
+    """SQL: the chat isn't removed by staff, or she has written since it was removed."""
+    return (Conversation.dismissed_at.is_(None)) | (Conversation.last_customer_message_at > Conversation.dismissed_at)
 
 
 class ConversationEntry(Base):

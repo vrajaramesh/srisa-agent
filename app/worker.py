@@ -199,6 +199,10 @@ async def _process(conversation_id: uuid.UUID, background: list[asyncio.Task]) -
         if conversation.channel == "instagram":
             await _decide_echoes(session, conversation)
         pending = await repo.pending_inbound(session, conversation_id, MAX_ATTEMPTS)
+        if conversation.dismissed_at:      # removed by staff: what she wrote before that is not answered
+            for message in [m for m in pending if m.created_at <= conversation.dismissed_at]:
+                message.status, message.last_error = SKIPPED, "dismissed"
+            pending = [m for m in pending if m.created_at > conversation.dismissed_at]
         if not pending:
             return result
 

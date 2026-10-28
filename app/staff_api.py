@@ -18,7 +18,7 @@ from app import firms, insights, whatsapp_client
 from app import repositories as repo
 from app.config import get_settings
 from app.db import get_sessionmaker
-from app.models import INBOUND, Conversation, DailyReport, Message
+from app.models import INBOUND, Conversation, DailyReport, Message, is_visible
 from app.security import verify_admin, verify_tasks_token
 from app.worker import WorkerMessenger
 
@@ -89,7 +89,7 @@ async def list_conversations(request: Request, status: str = Query("waiting", pa
     """waiting = handed to the team (longest waiting first); all = most recently active."""
     await _authorize(request)
     async with get_sessionmaker()() as session:
-        stmt = select(Conversation)
+        stmt = select(Conversation).where(is_visible())
         stmt = (stmt.where(Conversation.needs_human).order_by(Conversation.needs_human_since.asc().nulls_first())
                 if status == "waiting" else stmt.order_by(Conversation.updated_at.desc()))
         conversations = list((await session.execute(stmt.limit(limit))).scalars().all())
@@ -102,7 +102,7 @@ async def list_conversations(request: Request, status: str = Query("waiting", pa
 async def waiting_count(request: Request) -> dict[str, int]:
     await _authorize(request)
     async with get_sessionmaker()() as session:
-        n = (await session.execute(select(func.count()).select_from(Conversation).where(Conversation.needs_human))).scalar_one()
+        n = (await session.execute(select(func.count()).select_from(Conversation).where(Conversation.needs_human, is_visible()))).scalar_one()
     return {"waiting": n}
 
 
@@ -256,6 +256,22 @@ async def resolve(conversation_id: uuid.UUID, request: Request) -> dict[str, Any
 async def keep_with_team(conversation_id: uuid.UUID, request: Request) -> dict[str, Any]:
     """Keep the bot off (e.g. a longer case)."""
     return await _set_needs_human(conversation_id, request, True, "with_team")
+
+
+@router.post("/conversations/{conversation_id}/dismiss")
+async def dismiss(conversation_id: uuid.UUID, request: Request) -> dict[str, Any]:
+    """Remove the chat from Customer chats: hidden from both lists, the AI sends no reminders and doesn't pick up
+    her old messages. Her next message brings the chat back and the AI answers it as usual."""
+    await _authorize(request)
+    async with get_sessionmaker()() as session, session.begin():
+        await repo.lock_conversation(session, conversation_id)
+        conversation = await session.get(Conversation, conversation_id)
+        if conversation is None:
+            raise HTTPException(status_code=404, detail="not_found")
+        conversation.dismissed_at = datetime.now(timezone.utc)
+        conversation.needs_human, conversation.needs_human_reason = False, None
+        logger.info("STAFF_DISMISSED", extra={"fields": {"conversation_id": str(conversation_id)}})
+    return {"dismissed": True}
 
 
 async def _set_needs_human(conversation_id: uuid.UUID, request: Request, value: bool, reason: str | None) -> dict[str, Any]:

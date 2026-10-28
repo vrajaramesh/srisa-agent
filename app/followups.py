@@ -27,7 +27,7 @@ from app.agent import flow, orders, tools
 from app.agent.formatting import format_rupees
 from app.config import get_settings
 from app.db import get_sessionmaker
-from app.models import DRAFT_SUBMITTED, INBOUND, Conversation, Message, OrderDraft, ProcessedEvent
+from app.models import DRAFT_SUBMITTED, INBOUND, Conversation, Message, OrderDraft, ProcessedEvent, is_visible
 from app.worker import WorkerMessenger, WorkerStore
 
 logger = logging.getLogger(__name__)
@@ -225,7 +225,7 @@ async def _candidates(session, now: datetime) -> list:
                                               OrderDraft.updated_at >= now - timedelta(days=2)).exists())
     window_open = Conversation.last_customer_message_at > now - WINDOW + MARGIN
     stmt = select(Conversation.id).where(
-        Conversation.channel == "whatsapp", Conversation.needs_human.is_(False), window_open,
+        Conversation.channel == "whatsapp", Conversation.needs_human.is_(False), window_open, is_visible(),
         ((Conversation.last_customer_message_at <= now - EARLIEST) & answered
          & (Conversation.stage != flow.ORDER_CREATED))
         | ((Conversation.stage == flow.ORDER_CREATED) & open_order))
@@ -264,7 +264,9 @@ async def run(now: datetime | None = None, dry_run: bool = False) -> dict[str, A
             await repo.lock_conversation(session, conversation_id)
             conversation = await session.get(Conversation, conversation_id)
             chat_mybill = mybill_client.FirmClient(mybill, conversation) if mybill is not None else None
-            if conversation is None or conversation.needs_human or conversation.external_user_id in staff:
+            if (conversation is None or conversation.needs_human or conversation.external_user_id in staff
+                    or (conversation.dismissed_at and not (conversation.last_customer_message_at
+                                                           and conversation.last_customer_message_at > conversation.dismissed_at))):
                 continue
             stats["checked"] += 1
             if not in_free_window(conversation, now):
