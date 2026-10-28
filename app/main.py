@@ -13,7 +13,7 @@ from fastapi.responses import JSONResponse, PlainTextResponse
 from pydantic import BaseModel
 from sqlalchemy.exc import SQLAlchemyError
 
-from app import events, firms, followups, insights, mybill_client, queue, worker, whatsapp_client
+from app import events, firms, followups, insights, mybill_client, queue, retention, worker, whatsapp_client
 from app.channels import instagram
 from app import repositories as repo
 from app.config import get_settings
@@ -368,6 +368,19 @@ async def daily_report_job(request: Request) -> Response:
         logger.warning("Rejected /internal/jobs/daily-report: missing or invalid ID token")
         return Response(status_code=403)
     return JSONResponse(await insights.run_daily_report(insights.today_ist()))
+
+
+@app.post("/internal/jobs/retention")
+async def retention_job(request: Request, dry_run: bool = False) -> Response:
+    """Cloud Scheduler (every night): delete old chat data (periods in app/retention.py)."""
+    settings = get_settings()
+    authorized = settings.scheduler_sa_email and await run_in_threadpool(
+        verify_tasks_token, request.headers.get("Authorization"), settings.tasks_target_url.rstrip("/"),
+        settings.scheduler_sa_email)
+    if not authorized:
+        logger.warning("Rejected /internal/jobs/retention: missing or invalid ID token")
+        return Response(status_code=403)
+    return JSONResponse(await retention.run(dry_run=dry_run))
 
 
 @app.post("/internal/events")
