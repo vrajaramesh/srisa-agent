@@ -107,6 +107,14 @@ async def run_agent(conversation: Conversation, history: list[Message], ctx: too
 
             if response.stop_reason == "refusal":
                 category = getattr(getattr(response, "stop_details", None), "category", None)
+                fallback_model = settings.llm_refusal_fallback_model
+                if fallback_model and request["model"] != fallback_model:
+                    # Haiku 5.5 has no server-side fallback: retry this step once on the fallback model.
+                    logger.warning("LLM refusal, retrying on fallback model",
+                                   extra={"fields": {"model": request["model"], "fallback": fallback_model,
+                                                     "category": category}})
+                    request["model"] = result.model = fallback_model
+                    continue
                 result.error, result.fallback = f"refusal:{category}", True
                 break
 

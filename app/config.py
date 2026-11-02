@@ -26,7 +26,9 @@ class AgentSettings(BaseSettings):
 
     # None = let the SDK resolve credentials (ANTHROPIC_API_KEY env, `ant auth login` profile, ...).
     anthropic_api_key: SecretStr | None = None
-    llm_model: str = "claude-sonnet-5-5"
+    llm_model: str = "claude-haiku-5-5"
+    # Haiku 5.5 has no server-side fallback: a step its safety classifier declines is retried once on this model.
+    llm_refusal_fallback_model: str = "claude-sonnet-5-5"
     llm_max_tokens: int = 600
     llm_max_tool_iterations: int = 5
     llm_timeout_seconds: float = 30.0

@@ -61,7 +61,7 @@ jobs:
             TASKS_LOCATION=${{ env.REGION }}
             TASKS_TARGET_URL=${{ env.SERVICE_URL }}
             TASKS_SERVICE_ACCOUNT=${{ env.TASKS_SA }}
-            LLM_MODEL=claude-sonnet-5-5
+            LLM_MODEL=claude-haiku-5-5
             LLM_MAX_TOKENS=600
             LLM_MAX_TOOL_ITERATIONS=5
             LLM_TIMEOUT_SECONDS=30
