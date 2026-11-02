@@ -6,7 +6,7 @@ after a failed send re-sends and a duplicate after success is ignored.
 """
 
 import logging
-from datetime import date
+from datetime import date, datetime, timedelta, timezone
 from typing import Any
 
 from pydantic import BaseModel
@@ -41,6 +41,11 @@ class PaymentEvent(BaseModel):
     delivery_address: str | None = None
     code: str | None = None
     tenant: str | None = None   # mybill firm schema of the order (firm_srisa, firm_srihitha)
+    # Courier events (order.dispatched / order.out_for_delivery / order.delivered)
+    courier: str | None = None
+    awb: str | None = None
+    tracking_url: str | None = None
+    courier_location: str | None = None
 
 
 def _first_name(name: str | None) -> str:
@@ -69,6 +74,8 @@ def message_for(event: PaymentEvent) -> str | None:
             phone = f" on {event.customer_phone}" if event.customer_phone else ""
             text += f"\n📏 Our tailor will call you{phone} shortly to take your exact measurements."
         return text
+    if event.event in COURIER_EVENTS:
+        return courier_text(event)
     if event.event == "payment_link.expired":
         return f"⏰ The payment link for order {event.order_no} has expired. Reply \"pay\" and I'll send you a new one."
     if event.event == "payment_link.cancelled":
@@ -77,6 +84,33 @@ def message_for(event: PaymentEvent) -> str | None:
 
 
 WEBSITE_ORDER_PAID, RESET_CODE = "ecom.order.paid", "ecom.reset_code"
+DISPATCHED, OUT_FOR_DELIVERY, DELIVERED = "order.dispatched", "order.out_for_delivery", "order.delivered"
+COURIER_EVENTS = (DISPATCHED, OUT_FOR_DELIVERY, DELIVERED)
+REPLY_WINDOW = timedelta(hours=24)
+
+
+def _courier_name(event: "PaymentEvent") -> str:
+    return (event.courier or "courier").title()
+
+
+def courier_status(event: "PaymentEvent") -> str:
+    """The middle of the update: "has been shipped with Delhivery (tracking no. 123...)"."""
+    if event.event == DISPATCHED:
+        return f"has been shipped with {_courier_name(event)} (tracking no. {event.awb})"
+    if event.event == OUT_FOR_DELIVERY:
+        return "is out for delivery today"
+    return "has been delivered"
+
+
+def courier_text(event: "PaymentEvent") -> str:
+    hi = f"Hi {_first_name(event.customer_name)}! " if _first_name(event.customer_name) else ""
+    track = f"\nTrack it here 👉 {event.tracking_url}" if event.tracking_url else ""
+    if event.event == DISPATCHED:
+        return (f"📦 {hi}Your order {event.order_no} has been shipped with {_courier_name(event)}.\n"
+                f"Tracking number (AWB): {event.awb}{track}")
+    if event.event == OUT_FOR_DELIVERY:
+        return f"🚚 {hi}Your order {event.order_no} is out for delivery today. Please keep your phone handy.{track}"
+    return f"✅ {hi}Your order {event.order_no} has been delivered. Thank you for shopping with SRISA! 💜"
 GOODS_TYPES = ("FABRIC", "READYMADE", "MIXED")       # ready goods: packed and dispatched from stock
 WEBSITE_EVENTS = (WEBSITE_ORDER_PAID, RESET_CODE)
 
@@ -115,6 +149,8 @@ async def handle(event: PaymentEvent) -> dict[str, Any]:
     A paid order that needs exact measurements also alerts the staff (once, after the event is recorded)."""
     if event.event in WEBSITE_EVENTS:
         return await _handle_website(event)
+    if event.event in COURIER_EVENTS:
+        return await _handle_courier(event)
     text = message_for(event)
     if text is None:
         return {"status": "ignored_event_type"}
@@ -147,4 +183,50 @@ async def handle(event: PaymentEvent) -> dict[str, Any]:
         design = " ".join(p for p in (event.design_code, event.design_name) if p) or None
         await staff_alerts.alert_measurement_call(event.order_no, event.customer_name, event.customer_phone,
                                                   design, event.amount)
+    return {"status": status}
+
+
+async def _handle_courier(event: PaymentEvent) -> dict[str, Any]:
+    """Courier update to the customer, once. Inside her 24 h window: a normal message in the chat. Outside it: the
+    approved shipping template; if that fails, the dispatch is alerted to staff so they forward the tracking link.
+    Never raises (a closed window is not worth mybill retrying)."""
+    settings = get_settings()
+    wa_id = "".join(ch for ch in (event.customer_phone or "") if ch.isdigit())
+    if len(wa_id) == 10:
+        wa_id = "91" + wa_id
+    status = "unknown_customer"
+    async with get_sessionmaker()() as session, session.begin():
+        inserted = (await session.execute(
+            pg_insert(ProcessedEvent).values(event_id=event.event_id, event_type=event.event, order_no=event.order_no)
+            .on_conflict_do_nothing(index_elements=["event_id"]).returning(ProcessedEvent.event_id)
+        )).scalar_one_or_none()
+        if inserted is None:
+            return {"status": "duplicate"}
+        conversation = (await session.execute(
+            select(Conversation).where(Conversation.channel == "whatsapp", Conversation.external_user_id == wa_id)
+        )).scalar_one_or_none()
+        if conversation is not None:
+            await repo.lock_conversation(session, conversation.id)
+            last = conversation.last_customer_message_at
+            if last is not None and datetime.now(timezone.utc) - last <= REPLY_WINDOW:
+                messenger = WorkerMessenger(session, conversation)
+                status = "sent" if await messenger.send_text(courier_text(event)) else "send_failed"
+            else:
+                params = [_first_name(event.customer_name) or "there", event.order_no, courier_status(event),
+                          event.tracking_url or "-"]
+                result = await whatsapp_client.send_template(wa_id, settings.shipping_update_template,
+                                                             settings.shipping_update_template_lang, params)
+                if result.ok:
+                    repo.add_outbound_message(session, conversation.id, courier_text(event), result.message_id,
+                                              {"template": settings.shipping_update_template}, author="bot")
+                    status = "sent_template"
+                else:
+                    status = "window_closed"
+    logger.info("COURIER_EVENT", extra={"fields": {"event": event.event, "order_no": event.order_no, "status": status}})
+    if event.event == DISPATCHED and status not in ("sent", "sent_template"):
+        await staff_alerts.send_alert(
+            event.customer_name or "Customer", event.customer_phone or "-",
+            f"🚚 order {event.order_no} shipped ({_courier_name(event)} AWB {event.awb}) but WhatsApp couldn't message "
+            f"her ({status}). Please send her the tracking link: {event.tracking_url}",
+            event.tracking_url or "-")
     return {"status": status}

@@ -116,6 +116,10 @@ class Settings(DatabaseSettings, AgentSettings):
     # AUTHENTICATION template for website password-reset codes (srisafabrics.com "Forgot password").
     reset_code_template: str = "srisa_reset_code"
     reset_code_template_lang: str = "en"
+    # UTILITY template for courier updates when her last message is over 24 h old (WhatsApp then allows only templates).
+    # Body: "Hi {{1}}, your SRISA order {{2}} {{3}}. Track it here: {{4}}". Not approved yet = staff are alerted instead.
+    shipping_update_template: str = "order_shipping_update"
+    shipping_update_template_lang: str = "en"
     mybill_ui_url: str = ""  # link in the alert: {mybill_ui_url}/?chat=<conversation id>
 
     admin_api_key: SecretStr | None = None

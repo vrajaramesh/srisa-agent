@@ -354,7 +354,23 @@ async def followups_job(request: Request) -> Response:
         return Response(status_code=403)
     stats = await followups.run()
     logger.info("Follow-up job done", extra={"fields": stats})
+    stats["courier"] = await _courier_sync()
     return JSONResponse(stats)
+
+
+async def _courier_sync() -> dict:
+    """Courier status of shipped orders, per firm (mybill sends "out for delivery" / "delivered" via /internal/events)."""
+    base = mybill_client.get_client()
+    if base is None:
+        return {}
+    out: dict = {}
+    for firm in firms.all_firms():
+        try:
+            out[firm.key] = await base.for_tenant(firm.schema).courier_sync()
+        except Exception as exc:  # noqa: BLE001 - one firm failing must not stop the job
+            logger.warning("Courier sync failed", extra={"fields": {"firm": firm.key, "error": type(exc).__name__}})
+            out[firm.key] = {"error": type(exc).__name__}
+    return out
 
 
 @app.post("/internal/jobs/daily-report")

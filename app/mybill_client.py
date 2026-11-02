@@ -204,6 +204,17 @@ class MybillClient:
         except MybillNotFound:
             return None
 
+    async def get_tracking(self, order_no: str) -> dict[str, Any] | None:
+        """Live courier status {awb, tracking_url, status, location, expected_delivery, ...}; None if not shipped."""
+        try:
+            return await self._get(f"/api/agent/orders/{order_no}/tracking")
+        except MybillNotFound:
+            return None
+
+    async def courier_sync(self) -> dict[str, Any]:
+        """Refresh courier status of this firm's shipped orders (mybill messages updates through /internal/events)."""
+        return await self._request("POST", "/api/agent/courier/sync")
+
     async def resolve_marketing_link(self, source_type: str, source_id: str) -> dict[str, Any] | None:
         """Design an ad / post promotes -> {design_code, label}, or None (unknown or deactivated link).
         source_type is mybill's AD | IG_MEDIA."""
@@ -354,3 +365,16 @@ class FirmClient:
 
     async def create_payment_link(self, order_no: str) -> dict[str, Any]:
         return await self._order_call("create_payment_link", order_no)
+
+    async def get_tracking(self, order_no: str) -> dict[str, Any] | None:
+        """The chat's firm first, then the others (the order lives in one firm)."""
+        from app import firms
+        current = firms.get(self._conversation.firm)
+        for firm in [current] + [f for f in firms.all_firms() if f.key != current.key]:
+            try:
+                found = await self._base.for_tenant(firm.schema).get_tracking(order_no)
+            except MybillNotFound:
+                found = None
+            if found:
+                return found
+        return None

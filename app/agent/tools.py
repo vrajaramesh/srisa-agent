@@ -239,10 +239,25 @@ async def get_order_status(ctx: ToolContext, args: dict[str, Any]) -> dict[str, 
         result["payment_status"] = payment["status"]
         if payment["status"] == "created":
             result["payment_link"] = payment.get("short_url")
+    if order.get("awb"):
+        try:
+            tracking = await ctx.mybill.get_tracking(order_no)
+        except MybillUnavailable:
+            tracking = None
+        tracking = tracking or {}
+        result["courier"] = {"courier": order.get("courier"), "tracking_number": order["awb"],
+                             "tracking_link": order.get("tracking_url"),
+                             "status": tracking.get("status") or order.get("courier_status"),
+                             "location": tracking.get("location") or order.get("courier_location"),
+                             "expected_delivery": tracking.get("expected_delivery")}
     result["note"] = {
         "DRAFT": "Not paid yet - offer the payment link (resend_payment_link).",
         "PAYMENT_PENDING": "Waiting for payment - she can use the link, or ask for a new one (resend_payment_link).",
-        "PAID": "Paid - the tailor is working on it.",
+        "PAID": ("Paid - being packed for dispatch." if order.get("order_type") in ("FABRIC", "READYMADE", "MIXED")
+                 else "Paid - the tailor is working on it."),
+        "IN_STITCHING": "Paid - the tailor is working on it.",
+        "DISPATCHED": "Shipped - give her the courier status, the tracking number and the tracking link.",
+        "DELIVERED": "Delivered.",
     }.get(order["status"], "Tell her the status in simple words.")
     return result
 
@@ -1111,7 +1126,9 @@ TOOLS: list[Tool] = [
          {"type": "object", "properties": {}}, cancel_order_draft),
     Tool("get_order_status",
          "Her latest confirmed order: status (DRAFT, PAYMENT_PENDING, PAID, IN_STITCHING, DISPATCHED, DELIVERED), "
-         "total, payment status and estimated delivery date. Use it for any question about an existing order or payment.",
+         "total, payment status, estimated delivery date and, once shipped, the courier's live status, tracking "
+         "number and tracking link. Use it for any question about an existing order, payment or delivery "
+         "(\"where is my order\", \"tracking\").",
          {"type": "object", "properties": {}}, get_order_status),
     Tool("resend_payment_link",
          "Send her the payment link for her latest order (a fresh one if the old link expired). Use it when she "
