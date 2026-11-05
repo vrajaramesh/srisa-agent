@@ -180,6 +180,10 @@ def _metres(value: Any) -> str:
     return f"{float(value):g} m"
 
 
+DROPSHIP_RETURNS = ("↩️ Returns only if the item arrives damaged – please record a video while opening the parcel. "
+                    "Prepaid only.")
+
+
 def goods_line_text(line: dict[str, Any]) -> str:
     """'🧵 MCS-1B Blue check – 2.5 m × ₹300 = ₹750' / '👗 KUR-3A Kurti – size M × 2 × ₹899 = ₹1,798'."""
     label = " ".join(p for p in (line.get("item_code") or "", line.get("colour") or line.get("name") or "") if p)
@@ -221,6 +225,7 @@ def summary_text(draft: OrderDraft, design: dict[str, Any], quote: dict[str, Any
         f"Subtotal {format_rupees(b['subtotal'])} · Delivery {delivery}",
         f"*Total {format_rupees(b['total'])}*",
         *([f"🚚 Estimated delivery: {d}"] if (d := _fmt_date(quote.get("estimated_delivery_date"))) else []),
+        *([DROPSHIP_RETURNS] if quote.get("order_type") == "DROPSHIP" else []),
         "",
         "Tap ✅ Confirm to place the order, or ✏️ Change to edit.",
     ]

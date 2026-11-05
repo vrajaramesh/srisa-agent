@@ -161,6 +161,7 @@ def collection_intro(collection: dict[str, Any], hello: str) -> str:
     """Text before the item photos: what it is, price per metre / piece, how many options, sizes."""
     items = [i for i in collection.get("items") or [] if i.get("available")]
     fabric = collection.get("type") == "FABRIC"
+    dropship = tools.is_dropship(collection)
     prices = sorted({float(i["price"]) for i in items if i.get("price") is not None})
     unit = "m" if fabric else "piece"
     price = (f"{format_rupees(prices[0])}/{unit}" if len(prices) == 1 else
@@ -178,24 +179,24 @@ def collection_intro(collection: dict[str, Any], hello: str) -> str:
     if not fabric:
         sizes = []
         for i in items:
-            for s in i.get("sizes") or []:
-                if float(s["stock"]) > 0 and s["size"] not in sizes:
-                    sizes.append(s["size"])
+            for size in tools.item_sizes(i, dropship):
+                if size not in sizes:
+                    sizes.append(size)
         if sizes:
             lines.append(f"📏 Sizes: {', '.join(sizes[:12])}")
     lines.append("🚚 Shipped across India")
     return "\n".join(lines)
 
 
-def item_caption(item: dict[str, Any]) -> str:
+def item_caption(item: dict[str, Any], dropship: bool = False) -> str:
     unit = _unit(item)
     parts = [item["item_code"], item.get("colour") or item.get("product_name") or ""]
     if item.get("price") is not None:
         parts.append(f"{format_rupees(item['price'])}/{unit}")
-    sizes = [s["size"] for s in item.get("sizes") or [] if float(s["stock"]) > 0]
+    sizes = tools.item_sizes(item, dropship)
     if sizes:
         parts.append("sizes " + ", ".join(sizes))
-    if not item.get("available") or float(item.get("stock") or 0) <= 0:
+    if not tools.item_in_stock(item, dropship):
         parts.append("sold out")
     return " · ".join(p for p in parts if p)
 
@@ -208,7 +209,7 @@ async def send_collection_reply(ctx: tools.ToolContext, collection: dict[str, An
     sent = 0
     for item in (collection.get("items") or [])[:tools.MAX_COLLECTION_PHOTOS]:
         if item.get("image_url"):
-            if not await ctx.messenger.send_image(item["image_url"], item_caption(item)):
+            if not await ctx.messenger.send_image(item["image_url"], item_caption(item, tools.is_dropship(collection))):
                 return False
             sent += 1
     example = next((i["item_code"] for i in collection.get("items") or [] if i.get("available")), collection["code"] + "A")

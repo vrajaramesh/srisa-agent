@@ -253,7 +253,7 @@ async def get_order_status(ctx: ToolContext, args: dict[str, Any]) -> dict[str, 
     result["note"] = {
         "DRAFT": "Not paid yet - offer the payment link (resend_payment_link).",
         "PAYMENT_PENDING": "Waiting for payment - she can use the link, or ask for a new one (resend_payment_link).",
-        "PAID": ("Paid - being packed for dispatch." if order.get("order_type") in ("FABRIC", "READYMADE", "MIXED")
+        "PAID": ("Paid - being packed for dispatch." if order.get("order_type") in ("FABRIC", "READYMADE", "MIXED", "DROPSHIP")
                  else "Paid - the tailor is working on it."),
         "IN_STITCHING": "Paid - the tailor is working on it.",
         "DISPATCHED": "Shipped - give her the courier status, the tracking number and the tracking link.",
@@ -777,23 +777,42 @@ async def send_fabric_links(ctx: ToolContext, args: dict[str, Any]) -> dict[str,
 
 # ── collections & goods cart (fabric metres / readymade sizes) ─────────────────
 
+def is_dropship(collection: dict[str, Any]) -> bool:
+    """A supplier's products (DROPSHIP collection): the supplier holds the stock, so every listed size is available."""
+    return collection.get("type") == "DROPSHIP"
+
+
+def item_in_stock(item: dict[str, Any], dropship: bool = False) -> bool:
+    return bool(item.get("available")) and (dropship or float(item.get("stock") or 0) > 0)
+
+
+def item_sizes(item: dict[str, Any], dropship: bool = False) -> list[str]:
+    return [s["size"] for s in item.get("sizes") or [] if dropship or float(s["stock"]) > 0]
+
+
 def _collection_brief(c: dict[str, Any]) -> dict[str, Any]:
     """What the model may say about a collection. Stock is only 'in stock' or the sizes in stock (no counts)."""
+    dropship = is_dropship(c)
     items = []
     for i in c.get("items") or []:
         item = {"code": i["item_code"], "colour": i.get("colour"), "name": i.get("product_name"),
                 "price": i.get("price"), "unit": "m" if (i.get("unit") or "").lower() in METRE_UNITS else "piece",
-                "in_stock": bool(i.get("available")) and float(i.get("stock") or 0) > 0,
+                "in_stock": item_in_stock(i, dropship),
                 "has_photo": bool(i.get("image_url"))}
         if i.get("sizes"):
-            item["sizes_in_stock"] = [s["size"] for s in i["sizes"] if float(s["stock"]) > 0]
+            item["sizes_in_stock"] = item_sizes(i, dropship)
         if i.get("ai_instructions"):
             item["instructions"] = i["ai_instructions"]
-        if item["unit"] == "m":
+        if item["unit"] == "m" and not dropship:
             item["max_metres"] = float(i.get("stock") or 0)
         items.append(item)
-    return {"code": c["code"], "name": c["name"], "type": c["type"], "description": c.get("description"),
-            "instructions": c.get("ai_instructions"), "items": items}
+    brief = {"code": c["code"], "name": c["name"], "type": c["type"], "description": c.get("description"),
+             "instructions": c.get("ai_instructions"), "items": items}
+    if dropship:
+        brief["dispatch_days"] = c.get("dispatch_days")
+        brief["note"] = ("Dropship collection (see the Dropship rules): sold like readymade, in whole pieces; ships on its "
+                         "own, so it can't share an order with other items.")
+    return brief
 
 
 async def _load_collection(ctx: ToolContext, code: str | None) -> tuple[dict[str, Any] | None, str | None]:

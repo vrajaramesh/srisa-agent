@@ -74,11 +74,15 @@ async def alert_website_order(order_no: str, name: str | None, phone: str | None
 
 
 async def alert_dispatch(order_no: str, name: str | None, phone: str | None, amount: float | None,
-                         items: str | None, address: str | None, firm: "firms.Firm | None" = None) -> int:
-    """A paid WhatsApp goods order (fabric / readymade): cut or pack it and dispatch."""
+                         items: str | None, address: str | None, firm: "firms.Firm | None" = None,
+                         dropship: bool = False) -> int:
+    """A paid WhatsApp goods order (fabric / readymade): cut or pack it and dispatch. Dropship: the supplier ships it -
+    send them the order, pay them, and enter the tracking number they give."""
     settings = get_settings()
     paid = f" – paid ₹{amount:,.0f}" if amount is not None else ""
-    reason = (f"{_tag(firm)}📦 pack & dispatch WhatsApp order {order_no}{paid}" + (f"\nItems: {items}" if items else "")
+    action = ("🛒 dropship order {no}{paid}: send it to the supplier (WhatsApp Orders > Send to supplier), pay them, "
+              "then enter their tracking number" if dropship else "📦 pack & dispatch WhatsApp order {no}{paid}")
+    reason = (f"{_tag(firm)}" + action.format(no=order_no, paid=paid) + (f"\nItems: {items}" if items else "")
               + (f"\nShip to: {address}" if address else ""))
     link = (f"{settings.mybill_ui_url.rstrip('/')}/?order={order_no}" if settings.mybill_ui_url
             else "mybill-ui > Boutique > WhatsApp Orders")

@@ -111,7 +111,7 @@ def courier_text(event: "PaymentEvent") -> str:
     if event.event == OUT_FOR_DELIVERY:
         return f"🚚 {hi}Your order {event.order_no} is out for delivery today. Please keep your phone handy.{track}"
     return f"✅ {hi}Your order {event.order_no} has been delivered. Thank you for shopping with SRISA! 💜"
-GOODS_TYPES = ("FABRIC", "READYMADE", "MIXED")       # ready goods: packed and dispatched from stock
+GOODS_TYPES = ("FABRIC", "READYMADE", "MIXED", "DROPSHIP")   # ready goods: packed and dispatched (dropship: by the supplier)
 WEBSITE_EVENTS = (WEBSITE_ORDER_PAID, RESET_CODE)
 
 
@@ -178,7 +178,8 @@ async def handle(event: PaymentEvent) -> dict[str, Any]:
             status = "sent"
     if event.event == "order.paid" and event.order_type in GOODS_TYPES and status != "duplicate":
         await staff_alerts.alert_dispatch(event.order_no, event.customer_name, event.customer_phone, event.amount,
-                                          event.items, event.delivery_address, firm=firms.for_schema(event.tenant))
+                                          event.items, event.delivery_address, firm=firms.for_schema(event.tenant),
+                                          dropship=event.order_type == "DROPSHIP")
     if event.event == "order.paid" and event.exact_measurements_required:
         design = " ".join(p for p in (event.design_code, event.design_name) if p) or None
         await staff_alerts.alert_measurement_call(event.order_no, event.customer_name, event.customer_phone,
