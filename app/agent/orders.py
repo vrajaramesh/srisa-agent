@@ -397,7 +397,9 @@ async def confirm(conversation: Conversation, draft: OrderDraft | None, confirme
     previous = (draft.status, draft.mybill_order_no, conversation.stage)
     draft.status, draft.mybill_order_no = DRAFT_SUBMITTED, order["order_no"]
     flow.set_stage(conversation, flow.ORDER_CREATED)
-    wholesale = order.get("order_type") == "WHOLESALE"
+    from app import firms
+    # wholesale orders, and every order of a wholesale firm (Srihitha): no Razorpay link - the team sends the quotation
+    wholesale = order.get("order_type") == "WHOLESALE" or firms.get(conversation.firm).wholesale
     if wholesale:   # no payment link: the team sends the final quotation (transport, bank / PhonePe QR)
         text = wholesale_confirmation_text(order["order_no"])
     else:
