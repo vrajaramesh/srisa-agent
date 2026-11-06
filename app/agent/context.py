@@ -57,7 +57,7 @@ def facts_block(conversation: Conversation, order: dict[str, Any] | None = None,
     ]
     if firm.wholesale:
         product = (conversation.wholesale_context or {}).get("productName")
-        lines += [f"- Wholesale code she asked about: {conversation.current_collection_code or 'none'}"
+        lines += [f"- Code she asked about (wholesale collection, or SLW product code): {conversation.current_collection_code or 'none'}"
                   + (f" (product: {product})" if product else "")]
     else:
         lines += [

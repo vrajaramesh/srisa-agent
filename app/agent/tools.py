@@ -235,6 +235,10 @@ async def get_order_status(ctx: ToolContext, args: dict[str, Any]) -> dict[str, 
         return _unavailable()
     result: dict[str, Any] = {"order_no": order_no, "status": order["status"], "total": order["total"],
                               "estimated_delivery_date": order.get("estimated_delivery_date")}
+    if order.get("order_type") == "WHOLESALE":
+        result["note"] = ("Wholesale order: our team is preparing the final quotation (with transport) and sends it here "
+                          "with our bank and PhonePe QR details; she pays against that quotation. No payment link.")
+        return result
     if payment:
         result["payment_status"] = payment["status"]
         if payment["status"] == "created":
@@ -272,6 +276,9 @@ async def resend_payment_link(ctx: ToolContext, args: dict[str, Any]) -> dict[st
         link = await ctx.mybill.create_payment_link(order_no)
     except MybillRejected as exc:
         if exc.code == "ORDER_NOT_PAYABLE":
+            if "wholesale" in (exc.message or "").lower():
+                return {"error": "wholesale_order", "order_no": order_no,
+                        "note": "Wholesale orders are paid against the final quotation our team sends (bank / PhonePe QR)."}
             return {"error": "already_paid_or_cancelled", "order_no": order_no}
         return _unavailable()
     except (MybillUnavailable, MybillNotFound):
@@ -782,8 +789,26 @@ def is_dropship(collection: dict[str, Any]) -> bool:
     return collection.get("type") == "DROPSHIP"
 
 
+def is_wholesale(collection: dict[str, Any]) -> bool:
+    """A wholesale product's designs (WHOLESALE collection): slab prices + GST on the collection's total quantity."""
+    return collection.get("type") == "WHOLESALE"
+
+
 def item_in_stock(item: dict[str, Any], dropship: bool = False) -> bool:
+    if "in_stock" in item and "stock" not in item:      # wholesale items: mybill only says in stock or not
+        return bool(item.get("available")) and bool(item["in_stock"])
     return bool(item.get("available")) and (dropship or float(item.get("stock") or 0) > 0)
+
+
+def wholesale_from_price(collection: dict[str, Any]) -> tuple[float, str] | None:
+    """(lowest slab price, unit) of a wholesale collection - for captions ("from ₹95/m + GST")."""
+    w = collection.get("wholesale") or {}
+    slabs = w.get("price_slabs") or [s for p in w.get("products") or [] for s in p.get("price_slabs") or []]
+    prices = [float(s["price_per_unit"]) for s in slabs if s.get("price_per_unit") is not None]
+    if not prices:
+        return None
+    unit = w.get("unit") or next((p.get("unit") for p in w.get("products") or []), None) or ""
+    return min(prices), ("m" if unit.lower() in METRE_UNITS else unit)
 
 
 def item_sizes(item: dict[str, Any], dropship: bool = False) -> list[str]:
@@ -793,6 +818,8 @@ def item_sizes(item: dict[str, Any], dropship: bool = False) -> list[str]:
 def _collection_brief(c: dict[str, Any]) -> dict[str, Any]:
     """What the model may say about a collection. Stock is only 'in stock' or the sizes in stock (no counts)."""
     dropship = is_dropship(c)
+    if is_wholesale(c):
+        return _wholesale_brief(c)
     items = []
     for i in c.get("items") or []:
         item = {"code": i["item_code"], "colour": i.get("colour"), "name": i.get("product_name"),
@@ -813,6 +840,22 @@ def _collection_brief(c: dict[str, Any]) -> dict[str, Any]:
         brief["note"] = ("Dropship collection (see the Dropship rules): sold like readymade, in whole pieces; ships on its "
                          "own, so it can't share an order with other items.")
     return brief
+
+
+def _wholesale_brief(c: dict[str, Any]) -> dict[str, Any]:
+    items = []
+    for i in c.get("items") or []:
+        item = {"code": i["item_code"], "colour": i.get("colour"), "name": i.get("product_name"), "unit": i.get("unit"),
+                "in_stock": item_in_stock(i), "has_photo": bool(i.get("image_url"))}
+        if i.get("ai_instructions"):
+            item["instructions"] = i["ai_instructions"]
+        if i.get("description"):
+            item["description"] = i["description"]
+        items.append(item)
+    return {"code": c["code"], "name": c["name"], "type": c["type"], "description": c.get("description"),
+            "instructions": c.get("ai_instructions"), "items": items, "wholesale": c.get("wholesale"),
+            "note": ("Wholesale collection (see the Wholesale rules): quantities per code with set_cart_item; the price "
+                     "slab and minimum order apply to the total of all its codes; prices + GST; transport extra.")}
 
 
 async def _load_collection(ctx: ToolContext, code: str | None) -> tuple[dict[str, Any] | None, str | None]:
@@ -868,10 +911,12 @@ async def send_collection_photos(ctx: ToolContext, args: dict[str, Any]) -> dict
     wanted = {str(c).strip().upper() for c in (args.get("item_codes") or []) if str(c).strip()}
     items = [i for i in collection.get("items") or [] if i.get("image_url") and (not wanted or i["item_code"].upper() in wanted)]
     sent = 0
+    from_price = wholesale_from_price(collection) if is_wholesale(collection) else None
     for i in items[:MAX_COLLECTION_PHOTOS]:
         unit = "m" if (i.get("unit") or "").lower() in METRE_UNITS else "piece"
-        caption = " · ".join(p for p in (i["item_code"], i.get("colour") or i.get("product_name"),
-                                          f"{format_rupees(i.get('price'))}/{unit}" if i.get("price") is not None else "") if p)
+        price = (f"from {format_rupees(from_price[0])}/{from_price[1]} + GST" if from_price
+                 else f"{format_rupees(i.get('price'))}/{unit}" if i.get("price") is not None else "")
+        caption = " · ".join(p for p in (i["item_code"], i.get("colour") or i.get("product_name"), price) if p)
         if not await ctx.messenger.send_image(i["image_url"], caption):
             return {"error": "send_failed"}
         sent += 1
@@ -1353,13 +1398,23 @@ WHOLESALE_TOOL_LIST: list[Tool] = [
          send_wholesale_photos),
 ]
 WHOLESALE_TOOLS = frozenset(t.name for t in WHOLESALE_TOOL_LIST) | {"request_human_help"}
+# Wholesale firms also sell their WHOLESALE collections (Boutique -> Collections) through the cart, like retail.
+WHOLESALE_CART_TOOLS = frozenset({"get_collection", "send_collection_photos", "set_cart_item", "remove_cart_item",
+                                  "finish_cart", "save_delivery_details", "send_order_summary", "change_address",
+                                  "get_order_progress", "get_order_status", "cancel_order_draft"})
 
 TOOLS_BY_NAME = {t.name: t for t in TOOLS + WHOLESALE_TOOL_LIST}
 
 
 def allowed(tool: Tool, stage: str, channel: str = "whatsapp", wholesale: bool = False) -> bool:
-    if wholesale:                     # wholesale chats: only the wholesale module's tools (any stage, any channel)
-        return tool.name in WHOLESALE_TOOLS
+    if wholesale:                     # wholesale chats: the wholesale module's tools + the collection cart (WhatsApp)
+        if tool.name in WHOLESALE_TOOLS:
+            return True
+        if tool.name not in WHOLESALE_CART_TOOLS:
+            return False
+        if channel == "instagram":
+            return tool.name in INSTAGRAM_TOOLS
+        return tool.allowed_in(stage)
     if tool.name in WHOLESALE_TOOLS and tool.name != "request_human_help":
         return False
     if channel == "instagram":

@@ -122,10 +122,7 @@ def switch(conversation, firm: Firm, why: str) -> bool:
 
 
 def code_firm(conversation, code: str | None) -> Firm:
-    """The firm to look `code` up in: its prefix firm, else (an unprefixed code) the retail default when the chat
-    is with a prefixed firm, else the chat's firm."""
+    """The firm to look `code` up in first: its prefix firm (SLW-…), else the chat's firm. Collection lookups that
+    miss there try the other firms (FirmClient._by_code), since every firm's collections can use any code."""
     by_prefix = for_code(code)
-    if by_prefix is not None:
-        return by_prefix
-    current = get(conversation.firm)
-    return get(DEFAULT) if current.code_prefixes else current
+    return by_prefix if by_prefix is not None else get(conversation.firm)

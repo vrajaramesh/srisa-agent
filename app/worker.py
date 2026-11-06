@@ -285,6 +285,8 @@ async def _confirmation_path(session: AsyncSession, ctx: tools.ToolContext, pend
                                   ctx.fabric)
     logger.info("Confirmation", extra={"fields": {"conversation_id": str(ctx.conversation.id), "outcome": outcome.kind,
                                                   "order_no": outcome.order_no}})
+    if outcome.kind == "created":
+        await _alert_wholesale_order(ctx.conversation, outcome.actions)
     if outcome.kind in ("created", "already_submitted", "resent_summary"):
         return "handled"
     if outcome.kind in ("unknown_draft", "not_ready"):
@@ -302,6 +304,23 @@ async def _confirmation_path(session: AsyncSession, ctx: tools.ToolContext, pend
         ctx.conversation.needs_human, ctx.conversation.needs_human_reason = False, None
         return ctx.messenger.error or "send failed"
     return "handled"
+
+
+async def _alert_wholesale_order(conversation: Conversation, actions: list[dict[str, Any]]) -> None:
+    """A confirmed wholesale cart: tell the team the quotation draft is waiting for transport + issue."""
+    for a in actions:
+        if a.get("action") != "wholesale_quotation_requested":
+            continue
+        name, contact = staff_alerts.describe(conversation)
+        quotation = f"Quotation draft #{a['quotation_id']}" if a.get("quotation_id") else "The quotation draft"
+        try:
+            await staff_alerts.send_alert(
+                name, contact,
+                f"[{firms.get(conversation.firm).name} – wholesale] order {a['order_no']} confirmed: {a.get('items') or ''}. "
+                f"{quotation} is in Wholesale → Quotations: add transport, issue it and send it with the bank / PhonePe QR.",
+                staff_alerts.chat_link(conversation))
+        except Exception as exc:  # the order is placed; an alert failure must not undo the reply
+            logger.warning("Wholesale order alert failed", extra={"fields": {"error": repr(exc)}})
 
 
 async def _report_event(mybill: Any, event: dict[str, Any]) -> None:

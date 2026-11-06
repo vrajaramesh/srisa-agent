@@ -188,6 +188,10 @@ def goods_line_text(line: dict[str, Any]) -> str:
     """'🧵 MCS-1B Blue check – 2.5 m × ₹300 = ₹750' / '👗 KUR-3A Kurti – size M × 2 × ₹899 = ₹1,798'."""
     label = " ".join(p for p in (line.get("item_code") or "", line.get("colour") or line.get("name") or "") if p)
     qty = float(line["quantity"])
+    if line.get("kind") == "WHOLESALE":
+        unit = line.get("unit") or ""
+        unit = "m" if unit.lower() in ("m", "meter", "meters", "metre", "metres", "mts", "mtr", "mtrs") else unit
+        return f"🧵 {label} – {qty:g} {unit} × {format_rupees(line['unit_price'])} = {format_rupees(line['line_total'])}"
     if line.get("kind") == "FABRIC":
         return f"🧵 {label} – {qty:g} m × {format_rupees(line['unit_price'])} = {format_rupees(line['line_total'])}"
     size = f"size {line['size']} " if line.get("size") else ""
@@ -215,6 +219,8 @@ def summary_text(draft: OrderDraft, design: dict[str, Any], quote: dict[str, Any
     else:
         item_lines = [f"👗 {design.get('name', draft.design_code)} ({draft.design_code})", size_line,
                       *([f"✂️ {opts}"] if opts else []), f"🔢 Qty {b.get('qty', draft.qty)}"]
+    if quote.get("order_type") == "WHOLESALE":
+        return "\n".join(([note, ""] if note else []) + wholesale_summary_lines(draft, quote, address))
     lines = ([note, ""] if note else []) + [
         "Please check your order 👇", "",
         *item_lines,
@@ -230,6 +236,32 @@ def summary_text(draft: OrderDraft, design: dict[str, Any], quote: dict[str, Any
         "Tap ✅ Confirm to place the order, or ✏️ Change to edit.",
     ]
     return "\n".join(lines)
+
+
+def wholesale_summary_lines(draft: OrderDraft, quote: dict[str, Any], address: str) -> list[str]:
+    """Wholesale cart: rates exclude GST; GST is an estimate and transport is added by the team in the final quotation."""
+    w = quote.get("wholesale") or {}
+    totals = [f"{c['collection']}: {float(c['total_quantity']):g} {c.get('unit') or ''} in total".strip()
+              for c in w.get("collections") or [] if len(quote.get("lines", [])) > 1]
+    return [
+        "Please check your order 👇", "",
+        *[goods_line_text(line) for line in quote.get("lines", [])],
+        *totals,
+        "",
+        f"📦 {address}",
+        f"📞 {draft.delivery_phone}",
+        "",
+        f"Amount {format_rupees(w.get('subtotal', quote['breakdown']['subtotal']))} + GST {format_rupees(w.get('gst', 0))}",
+        f"*Total {format_rupees(w.get('total_with_gst', quote['breakdown']['total']))}* (transport extra)",
+        "",
+        "Tap ✅ Confirm and our team will send you the final quotation with transport charges and payment details, "
+        "or ✏️ Change to edit.",
+    ]
+
+
+def wholesale_confirmation_text(order_no: str) -> str:
+    return (f"🙏 Thank you! Your order {order_no} is with our team. We'll add the transport charges and send you the "
+            "final quotation here, with our bank and PhonePe QR details for payment.")
 
 
 async def send_summary(conversation: Conversation, draft: OrderDraft, mybill: MybillClient, messenger: Messenger,
@@ -365,8 +397,12 @@ async def confirm(conversation: Conversation, draft: OrderDraft | None, confirme
     previous = (draft.status, draft.mybill_order_no, conversation.stage)
     draft.status, draft.mybill_order_no = DRAFT_SUBMITTED, order["order_no"]
     flow.set_stage(conversation, flow.ORDER_CREATED)
-    link = await payment_link(mybill, order["order_no"])
-    text = confirmation_text(order["order_no"], order["total"], link)
+    wholesale = order.get("order_type") == "WHOLESALE"
+    if wholesale:   # no payment link: the team sends the final quotation (transport, bank / PhonePe QR)
+        text = wholesale_confirmation_text(order["order_no"])
+    else:
+        link = await payment_link(mybill, order["order_no"])
+        text = confirmation_text(order["order_no"], order["total"], link)
     if not await messenger.send_text(text):
         # Not committed as submitted: the retry re-sends with the same idempotency key and gets the same order.
         draft.status, draft.mybill_order_no, conversation.stage = previous
@@ -374,4 +410,9 @@ async def confirm(conversation: Conversation, draft: OrderDraft | None, confirme
     logger.info("ORDER_CREATED", extra={"fields": {
         "conversation_id": str(conversation.id), "draft_id": str(draft.id), "version": draft.version,
         "order_no": order["order_no"], "total": order["total"]}})
-    return ConfirmOutcome("created", order["order_no"], actions=[{"action": "order_created", "order_no": order["order_no"]}])
+    actions = [{"action": "order_created", "order_no": order["order_no"]}]
+    if wholesale:
+        actions.append({"action": "wholesale_quotation_requested", "order_no": order["order_no"],
+                        "quotation_id": order.get("wholesale_quotation_id"), "total": order["total"],
+                        "items": "; ".join(goods_line_text(l) for l in (draft.last_quote or {}).get("lines", []))})
+    return ConfirmOutcome("created", order["order_no"], actions=actions)

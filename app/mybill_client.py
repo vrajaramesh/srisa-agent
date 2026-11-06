@@ -317,17 +317,18 @@ class FirmClient:
         return getattr(self._client(), name)
 
     async def _by_code(self, method: str, code: str) -> dict[str, Any]:
-        """Look the code up in its firm (by prefix); the chat moves there only if it is found."""
+        """Look the code up in its firm (by prefix, else the chat's firm), then in the other firms; the chat moves to
+        the firm that has it."""
         from app import firms
-        current, target = firms.get(self._conversation.firm), firms.code_firm(self._conversation, code)
-        try:
-            found = await getattr(self._base.for_tenant(target.schema), method)(code)
-        except MybillNotFound:
-            if target.key == current.key:
-                raise
-            return await getattr(self._client(), method)(code)
-        firms.switch(self._conversation, target, f"code {code}")
-        return found
+        target = firms.code_firm(self._conversation, code)
+        for firm in [target] + [f for f in firms.all_firms() if f.key != target.key]:
+            try:
+                found = await getattr(self._base.for_tenant(firm.schema), method)(code)
+            except MybillNotFound:
+                continue
+            firms.switch(self._conversation, firm, f"code {code}")
+            return found
+        raise MybillNotFound(f"{method} {code}")
 
     async def get_design(self, code: str) -> dict[str, Any]:
         return await self._by_code("get_design", code)
