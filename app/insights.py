@@ -118,7 +118,7 @@ async def collect(day: date) -> tuple[dict[str, Any], str, int]:
     by_conv: dict[Any, list[Message]] = {}
     for m in messages:
         by_conv.setdefault(m.conversation_id, []).append(m)
-    staff = set(get_settings().staff_alert_number_list)
+    staff = get_settings().all_staff_numbers
     by_conv = {k: v for k, v in by_conv.items()
                if k in conversations and conversations[k].external_user_id not in staff}
 

@@ -1119,7 +1119,7 @@ async def _wholesale(ctx: ToolContext, name: str, args: dict[str, Any]) -> dict[
         from app import staff_alerts
         name_, contact = staff_alerts.describe(conv)
         await staff_alerts.send_alert(name_, contact, f"[{firms.get(conv.firm).name} – wholesale] {note}",
-                                      staff_alerts.chat_link(conv))
+                                      staff_alerts.chat_link(conv), firm=firms.get(conv.firm))
         ctx.actions.append({"action": "wholesale_attention", "note": note})
     return out.get("result") or {}
 

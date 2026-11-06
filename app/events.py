@@ -229,5 +229,5 @@ async def _handle_courier(event: PaymentEvent) -> dict[str, Any]:
             event.customer_name or "Customer", event.customer_phone or "-",
             f"🚚 order {event.order_no} shipped ({_courier_name(event)} AWB {event.awb}) but WhatsApp couldn't message "
             f"her ({status}). Please send her the tracking link: {event.tracking_url}",
-            event.tracking_url or "-")
+            event.tracking_url or "-", firm=firms.for_schema(event.tenant))
     return {"status": status}

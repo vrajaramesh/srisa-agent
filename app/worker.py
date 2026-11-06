@@ -318,7 +318,7 @@ async def _alert_wholesale_order(conversation: Conversation, actions: list[dict[
                 name, contact,
                 f"[{firms.get(conversation.firm).name} – wholesale] order {a['order_no']} confirmed: {a.get('items') or ''}. "
                 f"{quotation} is in Wholesale → Quotations: add transport, issue it and send it with the bank / PhonePe QR.",
-                staff_alerts.chat_link(conversation))
+                staff_alerts.chat_link(conversation), firm=firms.get(conversation.firm))
         except Exception as exc:  # the order is placed; an alert failure must not undo the reply
             logger.warning("Wholesale order alert failed", extra={"fields": {"error": repr(exc)}})
 

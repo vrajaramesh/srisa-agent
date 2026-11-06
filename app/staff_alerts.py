@@ -45,7 +45,7 @@ async def alert_staff(conversation: Conversation) -> int:
     link = chat_link(conversation)
     logger.warning("STAFF_NEEDED", extra={"fields": {"conversation_id": str(conversation.id), "reason": reason,
                                                      "channel": conversation.channel}})
-    return await send_alert(name, contact, reason, link)
+    return await send_alert(name, contact, reason, link, firm=firms.get(conversation.firm))
 
 
 async def alert_measurement_call(order_no: str, name: str | None, phone: str | None, design: str | None,
@@ -87,7 +87,7 @@ async def alert_dispatch(order_no: str, name: str | None, phone: str | None, amo
     link = (f"{settings.mybill_ui_url.rstrip('/')}/?order={order_no}" if settings.mybill_ui_url
             else "mybill-ui > Boutique > WhatsApp Orders")
     logger.warning("DISPATCH_NEEDED", extra={"fields": {"order_no": order_no}})
-    return await send_alert(name or "Customer", phone or "-", reason, link)
+    return await send_alert(name or "Customer", phone or "-", reason, link, firm=firm)
 
 
 def _tag(firm: "firms.Firm | None") -> str:
@@ -95,19 +95,21 @@ def _tag(firm: "firms.Firm | None") -> str:
     return f"[{firm.name} – wholesale] " if firm is not None and firm.wholesale else ""
 
 
-def alert_text(name: str, contact: str, reason: str, link: str) -> str:
-    return (f"🔔 SRISA staff alert\n\nCustomer: {name}\nContact: {contact}\nAction needed: {reason}\n\n"
+def alert_text(name: str, contact: str, reason: str, link: str, firm: "firms.Firm | None" = None) -> str:
+    title = "SRISA" if firm is None or firm.key == firms.DEFAULT else firm.name
+    return (f"🔔 {title} staff alert\n\nCustomer: {name}\nContact: {contact}\nAction needed: {reason}\n\n"
             f"Please follow up with the customer and update the order in mybill: {link}")
 
 
-async def send_alert(name: str, contact: str, reason: str, link: str) -> int:
-    """To every STAFF_ALERT_NUMBERS: a normal text first (free, delivered at once if that staff phone messaged the
-    shop number in the last 24 h), else the approved "staff_alert" template. Returns how many were delivered."""
+async def send_alert(name: str, contact: str, reason: str, link: str, firm: "firms.Firm | None" = None) -> int:
+    """To the firm's staff numbers (STAFF_ALERT_NUMBERS; Srihitha: STAFF_ALERT_NUMBERS_SRIHITHA): a normal text first
+    (free, delivered at once if that staff phone messaged the shop number in the last 24 h), else the approved
+    "staff_alert" template. firm None = SRISA. Returns how many were delivered."""
     settings = get_settings()
     sent = 0
-    for number in settings.staff_alert_number_list:
+    for number in settings.staff_numbers_for(firm.key if firm is not None else None):
         try:
-            result = await whatsapp_client.send_text(number, alert_text(name, contact, reason, link))
+            result = await whatsapp_client.send_text(number, alert_text(name, contact, reason, link, firm))
             how = "text"
             if not result.ok:
                 result = await whatsapp_client.send_template(number, settings.staff_alert_template,

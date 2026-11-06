@@ -111,6 +111,8 @@ class Settings(DatabaseSettings, AgentSettings):
     # Staff alerts when a chat is handed to the team: WhatsApp template to these numbers (comma-separated,
     # digits with country code). Empty = no alerts. The template must be approved in WhatsApp Manager.
     staff_alert_numbers: str = ""
+    # Srihitha Looms World (wholesale) has its own staff phone(s); empty = its alerts go to staff_alert_numbers.
+    staff_alert_numbers_srihitha: str = ""
     staff_alert_template: str = "staff_alert"
     staff_alert_template_lang: str = "en"
     # AUTHENTICATION template for website password-reset codes (srisafabrics.com "Forgot password").
@@ -141,7 +143,18 @@ class Settings(DatabaseSettings, AgentSettings):
 
     @property
     def staff_alert_number_list(self) -> list[str]:
-        return [n.strip().lstrip("+").replace(" ", "") for n in self.staff_alert_numbers.split(",") if n.strip()]
+        return _numbers(self.staff_alert_numbers)
+
+    def staff_numbers_for(self, firm_key: str | None) -> list[str]:
+        """Who gets a firm's staff alerts: Srihitha's own numbers if set, else the default (SRISA) numbers."""
+        if firm_key == "srihitha" and _numbers(self.staff_alert_numbers_srihitha):
+            return _numbers(self.staff_alert_numbers_srihitha)
+        return self.staff_alert_number_list
+
+    @property
+    def all_staff_numbers(self) -> set[str]:
+        """Every firm's staff phones (they never get bot replies)."""
+        return set(self.staff_alert_number_list) | set(_numbers(self.staff_alert_numbers_srihitha))
 
     @property
     def allowed_ig_sender_set(self) -> frozenset[str]:
@@ -181,3 +194,8 @@ class Settings(DatabaseSettings, AgentSettings):
 def get_settings() -> Settings:
     """Return the process-wide Settings instance (cached)."""
     return Settings()  # type: ignore[call-arg]
+
+
+def _numbers(value: str) -> list[str]:
+    """Comma-separated phone numbers -> digits with country code (no '+', no spaces)."""
+    return [n.strip().lstrip("+").replace(" ", "") for n in (value or "").split(",") if n.strip()]

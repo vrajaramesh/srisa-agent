@@ -217,7 +217,7 @@ def _instagram_time(seconds: str | None) -> datetime:
 async def store_webhook(parsed: ParsedWebhook) -> list[uuid.UUID]:
     """Save messages and receipts in one transaction. Returns conversations needing work."""
     allowed = get_settings().allowed_sender_set
-    staff = set(get_settings().staff_alert_number_list)
+    staff = get_settings().all_staff_numbers
     to_process: list[uuid.UUID] = []
     async with get_sessionmaker()() as session, session.begin():
         for msg in parsed.messages:
