@@ -76,6 +76,7 @@ jobs:
             STAFF_ALERT_NUMBERS=918008152007
             STAFF_ALERT_NUMBERS_SRIHITHA=919441249575
             OWNER_NUMBERS=${{ vars.OWNER_NUMBERS }}
+            INSIGHTS_MODEL=claude-haiku-5-5
             SCHEDULER_SA_EMAIL=mybill-scheduler@project-0708fb26-e204-4400-ae9.iam.gserviceaccount.com
           secrets: |
             WA_ACCESS_TOKEN=WA_ACCESS_TOKEN:latest
