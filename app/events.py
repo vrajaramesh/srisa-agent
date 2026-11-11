@@ -46,6 +46,11 @@ class PaymentEvent(BaseModel):
     awb: str | None = None
     tracking_url: str | None = None
     courier_location: str | None = None
+    # "owner.message" (WhatsApp → Dropship intake): text or a list message to the owner (customer_phone)
+    kind: str | None = None                       # text | list
+    text: str | None = None
+    button_text: str | None = None
+    sections: list[dict[str, Any]] | None = None
 
 
 def _first_name(name: str | None) -> str:
@@ -151,6 +156,8 @@ async def handle(event: PaymentEvent) -> dict[str, Any]:
         return await _handle_website(event)
     if event.event in COURIER_EVENTS:
         return await _handle_courier(event)
+    if event.event == OWNER_MESSAGE:
+        return await _handle_owner(event)
     text = message_for(event)
     if text is None:
         return {"status": "ignored_event_type"}
@@ -185,6 +192,29 @@ async def handle(event: PaymentEvent) -> dict[str, Any]:
         await staff_alerts.alert_measurement_call(event.order_no, event.customer_name, event.customer_phone,
                                                   design, event.amount)
     return {"status": status}
+
+
+OWNER_MESSAGE = "owner.message"
+
+
+async def _handle_owner(event: PaymentEvent) -> dict[str, Any]:
+    """A message from mybill to the owner about a forwarded supplier post (they just messaged us, so the 24 h window is
+    open). Once per event_id; raises on a failed send so mybill retries."""
+    to = "".join(ch for ch in (event.customer_phone or "") if ch.isdigit())
+    if not to or not event.text:
+        return {"status": "invalid"}
+    if not await _first_time(event):
+        return {"status": "duplicate"}
+    if event.kind == "list" and event.sections:
+        result = await whatsapp_client.send_list(to, event.text, event.button_text or "Choose", event.sections)
+    else:
+        result = await whatsapp_client.send_text(to, event.text)
+    if not result.ok:
+        async with get_sessionmaker()() as session, session.begin():   # let mybill's retry send it again
+            await session.execute(ProcessedEvent.__table__.delete().where(ProcessedEvent.event_id == event.event_id))
+        raise RuntimeError(f"owner message not sent: {result.error}")
+    logger.info("OWNER_MESSAGE_SENT", extra={"fields": {"event_id": event.event_id, "kind": event.kind}})
+    return {"status": "sent"}
 
 
 async def _handle_courier(event: PaymentEvent) -> dict[str, Any]:

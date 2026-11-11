@@ -113,6 +113,11 @@ class Settings(DatabaseSettings, AgentSettings):
     staff_alert_numbers: str = ""
     # Srihitha Looms World (wholesale) has its own staff phone(s); empty = its alerts go to staff_alert_numbers.
     staff_alert_numbers_srihitha: str = ""
+    # WhatsApp → Dropship intake: posts forwarded from these numbers (comma-separated, digits with country code)
+    # become dropship collections in mybill instead of customer chats. Empty = intake off.
+    owner_numbers: str = ""
+    # A forwarded post is closed this many seconds after its last message (mybill dropship.intake.idle-seconds).
+    dropship_idle_seconds: int = 60
     staff_alert_template: str = "staff_alert"
     staff_alert_template_lang: str = "en"
     # AUTHENTICATION template for website password-reset codes (srisafabrics.com "Forgot password").
@@ -153,8 +158,12 @@ class Settings(DatabaseSettings, AgentSettings):
 
     @property
     def all_staff_numbers(self) -> set[str]:
-        """Every firm's staff phones (they never get bot replies)."""
-        return set(self.staff_alert_number_list) | set(_numbers(self.staff_alert_numbers_srihitha))
+        """Every firm's staff phones and the owner numbers (they never get bot replies)."""
+        return set(self.staff_alert_number_list) | set(_numbers(self.staff_alert_numbers_srihitha)) | self.owner_number_set
+
+    @property
+    def owner_number_set(self) -> set[str]:
+        return set(_numbers(self.owner_numbers))
 
     @property
     def allowed_ig_sender_set(self) -> frozenset[str]:

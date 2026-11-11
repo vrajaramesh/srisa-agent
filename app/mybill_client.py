@@ -186,6 +186,20 @@ class MybillClient:
     async def wholesale_images(self, product_id: int) -> list[str]:
         return (await self._get(f"/api/agent/wholesale/products/{product_id}/images")).get("images") or []
 
+    # WhatsApp → Dropship intake (the owner's forwarded supplier posts)
+    async def dropship_intake(self, body: dict[str, Any]) -> dict[str, Any]:
+        """One forwarded message (text, or image as base64) -> {status, batch_id, photo_no}. Idempotent."""
+        return await self._request("POST", "/api/agent/dropship/intake", json=body)
+
+    async def dropship_process_batches(self, force_from: str | None = None) -> dict[str, Any]:
+        """Close forwarded posts that have been quiet long enough (or the sender's post now)."""
+        return await self._request("POST", "/api/agent/dropship/process-batches",
+                                   json={"force_from": force_from} if force_from else {})
+
+    async def dropship_owner_reply(self, body: dict[str, Any]) -> dict[str, Any]:
+        """The owner's tap / command for a forwarded post -> {handled, ...}."""
+        return await self._request("POST", "/api/agent/dropship/owner-reply", json=body)
+
     async def daily_figures(self, day: str) -> dict[str, Any]:
         """One IST day's orders, payments and website sales (YYYY-MM-DD)."""
         return await self._get("/api/agent/reports/daily", params={"date": day})

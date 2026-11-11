@@ -13,7 +13,8 @@ from fastapi.responses import JSONResponse, PlainTextResponse
 from pydantic import BaseModel
 from sqlalchemy.exc import SQLAlchemyError
 
-from app import events, firms, followups, insights, mybill_client, queue, retention, worker, whatsapp_client
+from app import dropship_intake, events, firms, followups, insights, mybill_client, queue, retention, worker, whatsapp_client
+from app.mybill_client import MybillRejected
 from app.channels import instagram
 from app import repositories as repo
 from app.config import get_settings
@@ -102,14 +103,18 @@ async def receive_webhook(request: Request, background: BackgroundTasks) -> Resp
         logger.warning("Rejected webhook: body is not valid JSON")
         return Response(status_code=400)
 
+    parsed = parse_webhook(payload)
+    owner = get_settings().owner_number_set
+    owner_payloads = [dropship_intake.payload(m) for m in parsed.messages if m.from_ in owner]
     try:
-        conversation_ids = await store_webhook(parse_webhook(payload))
+        conversation_ids = await store_webhook(parsed)   # owner messages are stored too, but never answered
     except (SQLAlchemyError, OSError):
         # Not saved, so ask Meta to redeliver later instead of losing the message.
         logger.exception("Failed to store webhook")
         return Response(status_code=500)
 
     await queue.enqueue(conversation_ids, background)  # never raises
+    await queue.enqueue_owner(owner_payloads, background)  # never raises
     return Response(status_code=200)
 
 
@@ -296,6 +301,43 @@ async def process_message_task(request: Request, task: ProcessMessageTask) -> Re
         {"processed": result.processed, "failed": result.failed},
         status_code=500 if result.failed else 200,
     )
+
+
+async def _task_authorized(request: Request) -> bool:
+    settings = get_settings()
+    if not settings.use_cloud_tasks:
+        return True
+    return await run_in_threadpool(verify_tasks_token, request.headers.get("Authorization"),
+                                   settings.tasks_target_url.rstrip("/"), settings.tasks_service_account)
+
+
+@app.post(queue.OWNER_TASK_PATH)
+async def owner_message_task(request: Request) -> Response:
+    """Cloud Tasks: one of the owner's forwarded messages -> mybill dropship intake. 500 = retry."""
+    if not await _task_authorized(request):
+        return Response(status_code=403)
+    p = await request.json()
+    try:
+        result = await dropship_intake.handle(p)
+    except MybillRejected as exc:   # bad input: retrying won't help
+        logger.error("Dropship intake rejected", extra={"fields": {"wa_message_id": p.get("wa_message_id"), "error": str(exc)}})
+        return JSONResponse({"status": "rejected"})
+    except Exception as exc:
+        logger.error("Dropship intake failed", extra={"fields": {"wa_message_id": p.get("wa_message_id"), "error": repr(exc)[:300]}})
+        return JSONResponse({"status": "retry"}, status_code=500)
+    return JSONResponse(result)
+
+
+@app.post(queue.DROPSHIP_CLOSE_PATH)
+async def dropship_close_task(request: Request) -> Response:
+    """Cloud Tasks (delayed): close forwarded posts that have been quiet for dropship_idle_seconds."""
+    if not await _task_authorized(request):
+        return Response(status_code=403)
+    try:
+        return JSONResponse(await dropship_intake.close_quiet_batches())
+    except Exception as exc:
+        logger.error("Dropship close failed", extra={"fields": {"error": repr(exc)[:300]}})
+        return JSONResponse({"status": "retry"}, status_code=500)
 
 
 class ProcessCommentTask(BaseModel):

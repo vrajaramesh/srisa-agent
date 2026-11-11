@@ -18,6 +18,8 @@ logger = logging.getLogger(__name__)
 
 TASK_PATH = "/tasks/process-message"
 COMMENT_TASK_PATH = "/tasks/process-comment"
+OWNER_TASK_PATH = "/tasks/owner-message"          # one owner message -> mybill dropship intake
+DROPSHIP_CLOSE_PATH = "/tasks/dropship-close"     # delayed: close forwarded posts that went quiet
 
 _tasks_client: tasks_v2.CloudTasksAsyncClient | None = None
 
@@ -87,6 +89,42 @@ async def enqueue(conversation_ids: Iterable[uuid.UUID], background: BackgroundT
             await _enqueue_cloud_task(conversation_id, delay_seconds)
         except Exception:
             logger.exception("Failed to enqueue task", extra={"fields": {"conversation_id": str(conversation_id)}})
+
+
+async def _create_http_task(path: str, body: dict, delay_seconds: int = 0) -> None:
+    settings = get_settings()
+    client = _get_tasks_client()
+    parent = client.queue_path(settings.gcp_project, settings.tasks_location, settings.tasks_queue)
+    await client.create_task(parent=parent, task=build_http_task(path, body, delay_seconds))
+
+
+async def _owner_locally(payloads: list[dict], delay_seconds: int) -> None:
+    from app import dropship_intake
+    for p in payloads:
+        await dropship_intake.handle(p)
+    await asyncio.sleep(delay_seconds)
+    await dropship_intake.close_quiet_batches()
+
+
+async def enqueue_owner(payloads: list[dict], background: BackgroundTasks) -> None:
+    """The owner's forwarded post: one task per message (in order), then a delayed task that closes the post once it
+    has been quiet for dropship_idle_seconds - no polling job, so it works with min-instances=0. Never raises."""
+    if not payloads:
+        return
+    settings = get_settings()
+    delay = settings.dropship_idle_seconds + 5
+    if not settings.use_cloud_tasks:
+        background.add_task(_owner_locally, payloads, delay)
+        return
+    for p in payloads:
+        try:
+            await _create_http_task(OWNER_TASK_PATH, p)
+        except Exception:
+            logger.exception("Failed to enqueue owner message", extra={"fields": {"wa_message_id": p.get("wa_message_id")}})
+    try:
+        await _create_http_task(DROPSHIP_CLOSE_PATH, {}, delay)
+    except Exception:
+        logger.exception("Failed to enqueue dropship close")
 
 
 async def enqueue_comments(comment_ids: Iterable[str], background: BackgroundTasks) -> None:
