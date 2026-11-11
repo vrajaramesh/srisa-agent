@@ -60,6 +60,9 @@ class Conversation(Base):
     firm: Mapped[str] = mapped_column(Text, server_default=sql_text("'srisa'"), default="srisa")   # app.firms key
     # wholesale chats: mybill wholesale tools' context (productId, quantity, last quotation), sent back each call
     wholesale_context: Mapped[dict[str, Any] | None] = mapped_column(JSONB)
+    # dropship browsing (app/dropship_flow.py): {"collection", "step" browsing|awaiting_owner|confirmed, "item",
+    # "asked_at", "confirmed": [item codes the owner said are available]}
+    dropship_state: Mapped[dict[str, Any] | None] = mapped_column(JSONB)
     needs_human: Mapped[bool] = mapped_column(Boolean, server_default=sql_text("false"))
     # mybill-service customers.customer_id (set by start_order). Never shown to the model.
     mybill_customer_id: Mapped[int | None] = mapped_column(Integer)

@@ -203,6 +203,9 @@ def item_caption(item: dict[str, Any], dropship: bool = False) -> str:
 
 async def send_collection_reply(ctx: tools.ToolContext, collection: dict[str, Any]) -> bool:
     """A collection ad / post / code: intro, each item's photo with its code, then how to choose. False if WhatsApp failed."""
+    from app import dropship_flow
+    if dropship_flow.is_forwarded_dropship(collection) and collection.get("collage_url"):
+        return await dropship_flow.send_intro(ctx, collection)
     hello = greeting(ctx.conversation)
     if not await ctx.messenger.send_text(collection_intro(collection, hello)):
         return False

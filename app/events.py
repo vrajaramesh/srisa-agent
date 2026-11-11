@@ -52,6 +52,9 @@ class PaymentEvent(BaseModel):
     button_text: str | None = None
     sections: list[dict[str, Any]] | None = None
     image_url: str | None = None                  # sent just before the message (a list can't have an image header)
+    buttons: list[dict[str, Any]] | None = None   # kind "buttons": up to 3 reply buttons [{id, title}]
+    supplier_name: str | None = None              # DROPSHIP order.paid: who ships it
+    supplier_phone: str | None = None
 
 
 def _first_name(name: str | None) -> str:
@@ -184,6 +187,8 @@ async def handle(event: PaymentEvent) -> dict[str, Any]:
                 raise RuntimeError(f"WhatsApp send failed: {messenger.error}")
             logger.info("PAYMENT_EVENT_SENT", extra={"fields": {"event": event.event, "order_no": event.order_no}})
             status = "sent"
+    if event.event == "order.paid" and event.order_type == "DROPSHIP" and status != "duplicate":
+        await _tell_owners_paid(event)
     if event.event == "order.paid" and event.order_type in GOODS_TYPES and status != "duplicate":
         await staff_alerts.alert_dispatch(event.order_no, event.customer_name, event.customer_phone, event.amount,
                                           event.items, event.delivery_address, firm=firms.for_schema(event.tenant),
@@ -198,6 +203,24 @@ async def handle(event: PaymentEvent) -> dict[str, Any]:
 OWNER_MESSAGE = "owner.message"
 
 
+async def _tell_owners_paid(event: PaymentEvent) -> None:
+    """A dropship order is paid: "✅ {code} paid by {customer}. Order from {supplier} ({phone}). Ship to: {address}"
+    to the owner numbers (the people who forward the supplier posts). Best effort."""
+    from app import dropship_intake
+    who = (event.customer_name or "a customer") + (f" (+{event.customer_phone.lstrip('+')})" if event.customer_phone else "")
+    supplier = (event.supplier_name or "the supplier") + (f" ({event.supplier_phone})" if event.supplier_phone else "")
+    text = (f"✅ {event.items or event.order_no} paid by {who} – {format_rupees(event.amount) if event.amount else ''} "
+            f"(order {event.order_no}).\nOrder from {supplier}.\nShip to: {event.delivery_address or '-'}")
+    try:
+        owners = await dropship_intake.owner_numbers()
+    except Exception:  # noqa: BLE001
+        owners = dropship_intake.cached_owner_numbers()
+    for owner in owners:
+        result = await whatsapp_client.send_text(owner, text)
+        if not result.ok:
+            logger.warning("Owner paid message not sent", extra={"fields": {"order_no": event.order_no, "error": result.error}})
+
+
 async def _handle_owner(event: PaymentEvent) -> dict[str, Any]:
     """A message from mybill to the owner about a forwarded supplier post (they just messaged us, so the 24 h window is
     open). Once per event_id; raises on a failed send so mybill retries."""
@@ -210,6 +233,8 @@ async def _handle_owner(event: PaymentEvent) -> dict[str, Any]:
         await whatsapp_client.send_image(to, event.image_url)   # best effort: the list still goes out without it
     if event.kind == "list" and event.sections:
         result = await whatsapp_client.send_list(to, event.text, event.button_text or "Choose", event.sections)
+    elif event.kind == "buttons" and event.buttons:
+        result = await whatsapp_client.send_buttons(to, event.text, event.buttons)
     else:
         result = await whatsapp_client.send_text(to, event.text)
     if not result.ok:

@@ -195,6 +195,16 @@ class MybillClient:
         """Build the DRAFT collection of a post (AI reads the text and photos; can take a minute or two)."""
         return await self._request("POST", "/api/agent/dropship/extract", json={"batch_id": batch_id}, timeout=290)
 
+    async def dropship_ask_availability(self, item_code: str, conversation_id: str, customer_name: str | None,
+                                        customer_phone: str | None) -> dict[str, Any]:
+        """Ask the owner(s) whether a dropship variant is still available (Yes / No buttons)."""
+        return await self._request("POST", "/api/agent/dropship/availability", json={
+            "item_code": item_code, "conversation_id": conversation_id, "customer_name": customer_name,
+            "customer_phone": customer_phone})
+
+    async def dropship_sold_out(self, item_code: str) -> dict[str, Any]:
+        return await self._request("POST", f"/api/agent/dropship/items/{item_code}/sold-out")
+
     async def dropship_owner_numbers(self) -> list[str]:
         """Active owner numbers set in mybill (digits with country code)."""
         return (await self._get("/api/agent/dropship/owner-numbers")).get("numbers") or []

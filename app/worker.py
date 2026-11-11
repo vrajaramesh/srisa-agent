@@ -13,7 +13,7 @@ from typing import Any
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app import channels, firms, mybill_client, staff_alerts
+from app import channels, dropship_flow, firms, mybill_client, staff_alerts
 from app import repositories as repo
 from app.agent import ad_entry, fep, ig_handoff, orders, resolution, tools
 from app.agent.runner import AgentResult, run_agent
@@ -245,6 +245,8 @@ async def _process(conversation_id: uuid.UUID, background: list[asyncio.Task]) -
         firms.detect(conversation, ([referral.body, referral.headline] if referral is not None else [])
                      + [m.text for m in pending if not m.reply_id])
         error = await _confirmation_path(session, ctx, pending, mybill)
+        if error is None and referral is None and ref is None:
+            error = await dropship_flow.path(ctx, pending)   # forwarded dropship collections: intro / ALL / 07 / Buy
         if error is None and referral is not None:
             error = await _ad_entry_path(session, ctx, pending, entry_msg, referral, background)
         elif error is None and ref is not None:

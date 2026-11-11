@@ -68,6 +68,8 @@ def facts_block(conversation: Conversation, order: dict[str, Any] | None = None,
         f"- Order stage: {order.get('stage') or conversation.stage or 'browsing'}",
     ]
     lines += entry_lines(conversation)
+    from app import dropship_flow
+    lines += dropship_flow.facts(conversation)
     if order.get("draft"):
         filled = ", ".join(f"{k}={v}" for k, v in order["draft"].items())
         lines.append(f"- Order so far: {filled}")

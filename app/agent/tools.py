@@ -985,6 +985,11 @@ async def set_cart_item(ctx: ToolContext, args: dict[str, Any]) -> dict[str, Any
     quote, error = await _requote_cart(ctx, lines)
     if error:
         return error
+    from app import dropship_flow
+    if unconfirmed := dropship_flow.unconfirmed_dropship(ctx.conversation, quote.get("lines") or []):
+        return {"error": "availability_not_confirmed", "item_codes": unconfirmed,
+                "hint": "Dropship items need our team's OK first: call check_dropship_availability with the code; "
+                        "she gets the order details once it's confirmed."}
     if draft is None:
         try:
             customer = await ctx.mybill.upsert_customer(**orders.customer_identity(ctx.conversation))
@@ -1005,6 +1010,18 @@ async def set_cart_item(ctx: ToolContext, args: dict[str, Any]) -> dict[str, Any
     return {"ok": True, **_cart_view(quote),
             "next": "Ask if she wants anything else (another colour/size). When she's done, call finish_cart."
                     if draft.lines else "The cart is empty."}
+
+
+async def check_dropship_availability(ctx: ToolContext, args: dict[str, Any]) -> dict[str, Any]:
+    """She wants to buy a dropship variant: ask the owner (Yes / No); she is told we're checking."""
+    from app import dropship_flow
+    code = str(args.get("code") or "").strip().upper()
+    if not code or ctx.mybill is None:
+        return {"error": "invalid_input", "detail": "code of the variant, e.g. MGP1111-07"}
+    if not await dropship_flow.buy(ctx, code):
+        return {"error": "send_failed"}
+    return {"ok": True, "note": "She was told we're checking availability; the system messages her when the team answers. "
+                                "Don't ask for payment or add it to the cart now."}
 
 
 async def remove_cart_item(ctx: ToolContext, args: dict[str, Any]) -> dict[str, Any]:
@@ -1266,6 +1283,11 @@ TOOLS: list[Tool] = [
          {"type": "object", "properties": {"code": {"type": "string"}, "product_id": {"type": "integer"},
           "quantity": {**_NUM, "description": "metres (fabric) or pieces (readymade)"}, "size": {"type": "string"}},
           "required": ["quantity"]}, set_cart_item, SHOPPING | frozenset({SIZING, CUSTOMISE, ADDRESS, CONFIRM})),
+    Tool("check_dropship_availability",
+         "Dropship variant (code like MGP1111-07) she wants to buy: our team confirms it's in stock before she can order. "
+         "Call it instead of set_cart_item for dropship codes; she is told we're checking.",
+         {"type": "object", "properties": {"code": {"type": "string"}}, "required": ["code"]},
+         check_dropship_availability, SHOPPING | frozenset({CUSTOMISE, ADDRESS, CONFIRM})),
     Tool("remove_cart_item",
          "Remove a line from her cart (item code or product_id, plus size for readymade).",
          {"type": "object", "properties": {"code": {"type": "string"}, "product_id": {"type": "integer"},

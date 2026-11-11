@@ -70,6 +70,9 @@ async def handle(p: dict[str, Any]) -> dict[str, Any]:
     """One owner message. Raises on a temporary failure (the Cloud Task retries; mybill ignores duplicates)."""
     mybill = _client()
     text = p.get("text") or ""
+    if (p.get("reply_id") or "").startswith("avail:"):   # Yes / No: is a dropship variant still available?
+        from app import dropship_flow
+        return await dropship_flow.owner_answer(p["reply_id"], p["from"])
     if p.get("reply_id") or (p.get("type") == "text" and COMMAND.match(text)):
         result = await mybill.dropship_owner_reply({"from": p["from"], "reply_id": p.get("reply_id"), "text": text})
         logger.info("DROPSHIP_OWNER_REPLY", extra={"fields": {"result": result}})
