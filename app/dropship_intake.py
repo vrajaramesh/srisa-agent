@@ -10,6 +10,7 @@ Dropship is SRISA's business, so every call goes to SRISA's firm schema.
 import base64
 import logging
 import re
+import time
 from typing import Any
 
 from app import mybill_client, whatsapp_client
@@ -20,6 +21,33 @@ logger = logging.getLogger(__name__)
 
 # Owner texts that are commands, not part of a forwarded post.
 COMMAND = re.compile(r"(?is)^\s*(done|new supplier\b.*|supplier\s+.+)$")
+
+
+OWNER_CACHE_SECONDS = 60
+_owner_cache: tuple[float, set[str]] = (0.0, set())
+
+
+async def owner_numbers() -> set[str]:
+    """Owner numbers: the ones managed in mybill (Collections → Suppliers → Forwarding numbers, cached 1 min) plus
+    OWNER_NUMBERS from the environment. If mybill can't be reached, the last list is kept."""
+    global _owner_cache
+    from app.config import get_settings
+    fetched_at, cached = _owner_cache
+    if time.monotonic() - fetched_at > OWNER_CACHE_SECONDS:
+        try:
+            numbers = await _client().dropship_owner_numbers()
+            cached = {"".join(ch for ch in n if ch.isdigit()) for n in numbers}
+            _owner_cache = (time.monotonic(), cached)
+        except Exception as exc:  # noqa: BLE001 - routing must never fail the webhook
+            logger.warning("Owner numbers not refreshed", extra={"fields": {"error": repr(exc)[:200]}})
+            _owner_cache = (time.monotonic() - OWNER_CACHE_SECONDS + 10, cached)   # retry in 10 s
+    return cached | get_settings().owner_number_set
+
+
+def cached_owner_numbers() -> set[str]:
+    """The last known owner numbers without a network call (for reports / follow-ups)."""
+    from app.config import get_settings
+    return _owner_cache[1] | get_settings().owner_number_set
 
 
 def payload(msg: IncomingMessage) -> dict[str, Any]:

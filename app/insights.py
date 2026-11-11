@@ -18,6 +18,7 @@ import anthropic
 from sqlalchemy import func, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
+from app import dropship_intake
 from app import firms, mybill_client
 from app.config import get_settings
 from app.db import get_sessionmaker
@@ -118,7 +119,7 @@ async def collect(day: date) -> tuple[dict[str, Any], str, int]:
     by_conv: dict[Any, list[Message]] = {}
     for m in messages:
         by_conv.setdefault(m.conversation_id, []).append(m)
-    staff = get_settings().all_staff_numbers
+    staff = (get_settings().all_staff_numbers | dropship_intake.cached_owner_numbers())
     by_conv = {k: v for k, v in by_conv.items()
                if k in conversations and conversations[k].external_user_id not in staff}
 

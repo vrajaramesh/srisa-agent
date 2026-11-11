@@ -21,6 +21,7 @@ from typing import Any
 from sqlalchemy import func, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
+from app import dropship_intake
 from app import mybill_client
 from app import repositories as repo
 from app.agent import flow, orders, tools
@@ -251,7 +252,7 @@ async def run(now: datetime | None = None, dry_run: bool = False) -> dict[str, A
     if not is_daytime(now):
         return stats                             # reminders only 09:00-21:00 IST
     mybill = mybill_client.get_client()
-    staff = settings.all_staff_numbers
+    staff = (settings.all_staff_numbers | dropship_intake.cached_owner_numbers())
     async with get_sessionmaker()() as session:
         ids = await _candidates(session, now)
     stats["candidates"] = len(ids)

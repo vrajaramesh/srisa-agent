@@ -104,10 +104,10 @@ async def receive_webhook(request: Request, background: BackgroundTasks) -> Resp
         return Response(status_code=400)
 
     parsed = parse_webhook(payload)
-    owner = get_settings().owner_number_set
+    owner = await dropship_intake.owner_numbers() if parsed.messages else set()
     owner_payloads = [dropship_intake.payload(m) for m in parsed.messages if m.from_ in owner]
     try:
-        conversation_ids = await store_webhook(parsed)   # owner messages are stored too, but never answered
+        conversation_ids = await store_webhook(parsed, owner)   # owner messages are stored too, but never answered
     except (SQLAlchemyError, OSError):
         # Not saved, so ask Meta to redeliver later instead of losing the message.
         logger.exception("Failed to store webhook")
@@ -219,10 +219,11 @@ def _instagram_time(seconds: str | None) -> datetime:
         return datetime.now(timezone.utc)
 
 
-async def store_webhook(parsed: ParsedWebhook) -> list[uuid.UUID]:
-    """Save messages and receipts in one transaction. Returns conversations needing work."""
+async def store_webhook(parsed: ParsedWebhook, owners: set[str] | None = None) -> list[uuid.UUID]:
+    """Save messages and receipts in one transaction. Returns conversations needing work. owners = owner numbers
+    (their forwarded posts go to the dropship intake; the AI never answers them)."""
     allowed = get_settings().allowed_sender_set
-    staff = get_settings().all_staff_numbers
+    staff = get_settings().all_staff_numbers | (owners or set())
     to_process: list[uuid.UUID] = []
     async with get_sessionmaker()() as session, session.begin():
         for msg in parsed.messages:

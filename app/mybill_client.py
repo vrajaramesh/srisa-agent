@@ -191,6 +191,10 @@ class MybillClient:
         """One forwarded message (text, or image as base64) -> {status, batch_id, photo_no}. Idempotent."""
         return await self._request("POST", "/api/agent/dropship/intake", json=body)
 
+    async def dropship_owner_numbers(self) -> list[str]:
+        """Active owner numbers set in mybill (digits with country code)."""
+        return (await self._get("/api/agent/dropship/owner-numbers")).get("numbers") or []
+
     async def dropship_process_batches(self, force_from: str | None = None) -> dict[str, Any]:
         """Close forwarded posts that have been quiet long enough (or the sender's post now)."""
         return await self._request("POST", "/api/agent/dropship/process-batches",
