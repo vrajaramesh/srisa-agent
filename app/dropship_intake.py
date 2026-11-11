@@ -20,7 +20,7 @@ from app.webhook_parser import IncomingMessage
 logger = logging.getLogger(__name__)
 
 # Owner texts that are commands, not part of a forwarded post.
-COMMAND = re.compile(r"(?is)^\s*(done|new supplier\b.*|supplier\s+.+)$")
+COMMAND = re.compile(r"(?is)^\s*(done|new supplier\b.*|supplier\s+.+|retry\s*#?\d+)$")
 
 
 OWNER_CACHE_SECONDS = 60
