@@ -320,6 +320,8 @@ async def owner_message_task(request: Request) -> Response:
     p = await request.json()
     try:
         result = await dropship_intake.handle(p)
+        if (batch_id := dropship_intake.needs_extraction(result)) is not None:
+            await queue.enqueue_dropship_extract(batch_id)
     except MybillRejected as exc:   # bad input: retrying won't help
         logger.error("Dropship intake rejected", extra={"fields": {"wa_message_id": p.get("wa_message_id"), "error": str(exc)}})
         return JSONResponse({"status": "rejected"})
@@ -327,6 +329,22 @@ async def owner_message_task(request: Request) -> Response:
         logger.error("Dropship intake failed", extra={"fields": {"wa_message_id": p.get("wa_message_id"), "error": repr(exc)[:300]}})
         return JSONResponse({"status": "retry"}, status_code=500)
     return JSONResponse(result)
+
+
+@app.post(queue.DROPSHIP_EXTRACT_PATH)
+async def dropship_extract_task(request: Request) -> Response:
+    """Cloud Tasks: AI extraction of a post -> DRAFT collection in mybill (which tells the owner). 500 = retry."""
+    if not await _task_authorized(request):
+        return Response(status_code=403)
+    batch_id = int((await request.json()).get("batch_id"))
+    try:
+        return JSONResponse(await dropship_intake.extract(batch_id))
+    except MybillRejected as exc:
+        logger.error("Dropship extraction rejected", extra={"fields": {"batch_id": batch_id, "error": str(exc)}})
+        return JSONResponse({"status": "rejected"})
+    except Exception as exc:
+        logger.error("Dropship extraction failed", extra={"fields": {"batch_id": batch_id, "error": repr(exc)[:300]}})
+        return JSONResponse({"status": "retry"}, status_code=500)
 
 
 @app.post(queue.DROPSHIP_CLOSE_PATH)

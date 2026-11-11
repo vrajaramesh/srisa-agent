@@ -191,6 +191,10 @@ class MybillClient:
         """One forwarded message (text, or image as base64) -> {status, batch_id, photo_no}. Idempotent."""
         return await self._request("POST", "/api/agent/dropship/intake", json=body)
 
+    async def dropship_extract(self, batch_id: int) -> dict[str, Any]:
+        """Build the DRAFT collection of a post (AI reads the text and photos; can take a minute or two)."""
+        return await self._request("POST", "/api/agent/dropship/extract", json={"batch_id": batch_id}, timeout=290)
+
     async def dropship_owner_numbers(self) -> list[str]:
         """Active owner numbers set in mybill (digits with country code)."""
         return (await self._get("/api/agent/dropship/owner-numbers")).get("numbers") or []
@@ -249,7 +253,7 @@ class MybillClient:
         return await self._request("GET", path, params=params)
 
     async def _request(self, method: str, path: str, params: dict[str, Any] | None = None,
-                       json: dict[str, Any] | None = None) -> Any:
+                       json: dict[str, Any] | None = None, timeout: float | None = None) -> Any:
         try:
             token = await self._token_provider()
         except Exception as exc:  # metadata server / gcloud problems
@@ -262,7 +266,8 @@ class MybillClient:
         attempts = 2 if method == "GET" else 1
         for attempt in range(1, attempts + 1):
             try:
-                resp = await self._http.request(method, f"{self._base}{path}", params=params, json=json, headers=headers)
+                resp = await self._http.request(method, f"{self._base}{path}", params=params, json=json, headers=headers,
+                                                **({"timeout": timeout} if timeout else {}))
                 break
             except (httpx.TimeoutException, httpx.ConnectError) as exc:
                 if attempt < attempts:

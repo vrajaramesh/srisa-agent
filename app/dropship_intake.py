@@ -90,5 +90,16 @@ async def handle(p: dict[str, Any]) -> dict[str, Any]:
     return {"status": "ignored", "type": p.get("type")}
 
 
+async def extract(batch_id: int) -> dict[str, Any]:
+    return await _client().dropship_extract(batch_id)
+
+
+def needs_extraction(result: dict[str, Any]) -> int | None:
+    """The batch to build once the owner chose its supplier (owner-reply result), else None."""
+    if result.get("action") in ("supplier_set", "supplier_created") and result.get("batch_id"):
+        return int(result["batch_id"])
+    return None
+
+
 async def close_quiet_batches() -> dict[str, Any]:
     return await _client().dropship_process_batches()
