@@ -20,7 +20,7 @@ from app.webhook_parser import IncomingMessage
 logger = logging.getLogger(__name__)
 
 # Owner texts that are commands, not part of a forwarded post.
-COMMAND = re.compile(r"(?is)^\s*(done|new supplier\b.*|supplier\s+.+|retry\s*#?\d+)$")
+COMMAND = re.compile(r"(?is)^\s*(done|new supplier\b.*|supplier\s+.+|retry\s*#?\d+|price\s+[a-z0-9-]*\s*₹?\s*\d{2,6}(\.\d{1,2})?)$")
 
 
 OWNER_CACHE_SECONDS = 60
@@ -101,6 +101,17 @@ def needs_extraction(result: dict[str, Any]) -> int | None:
     """The batch to build once the owner chose its supplier (owner-reply result), else None."""
     if result.get("action") in ("supplier_set", "supplier_created") and result.get("batch_id"):
         return int(result["batch_id"])
+    return None
+
+
+async def publish(collection_id: int) -> dict[str, Any]:
+    return await _client().dropship_publish(collection_id)
+
+
+def needs_publishing(result: dict[str, Any]) -> int | None:
+    """The collection to post once the owner tapped Approve (owner-reply result), else None."""
+    if result.get("action") == "publish" and result.get("collection_id"):
+        return int(result["collection_id"])
     return None
 
 

@@ -21,6 +21,7 @@ COMMENT_TASK_PATH = "/tasks/process-comment"
 OWNER_TASK_PATH = "/tasks/owner-message"          # one owner message -> mybill dropship intake
 DROPSHIP_CLOSE_PATH = "/tasks/dropship-close"     # delayed: close forwarded posts that went quiet
 DROPSHIP_EXTRACT_PATH = "/tasks/dropship-extract"  # build the draft collection (AI) once the supplier is chosen
+DROPSHIP_PUBLISH_PATH = "/tasks/dropship-publish"  # post an approved collection on Instagram + Meta catalog
 
 _tasks_client: tasks_v2.CloudTasksAsyncClient | None = None
 
@@ -136,6 +137,18 @@ async def enqueue_dropship_extract(batch_id: int, background: BackgroundTasks | 
         await _create_http_task(DROPSHIP_EXTRACT_PATH, {"batch_id": batch_id})
     except Exception:
         logger.exception("Failed to enqueue dropship extraction", extra={"fields": {"batch_id": batch_id}})
+
+
+async def enqueue_dropship_publish(collection_id: int) -> None:
+    """Instagram posting takes up to a couple of minutes: its own task (a repeat doesn't post twice)."""
+    if not get_settings().use_cloud_tasks:
+        from app import dropship_intake
+        asyncio.create_task(dropship_intake.publish(collection_id))
+        return
+    try:
+        await _create_http_task(DROPSHIP_PUBLISH_PATH, {"collection_id": collection_id})
+    except Exception:
+        logger.exception("Failed to enqueue dropship publishing", extra={"fields": {"collection_id": collection_id}})
 
 
 REMINDER_DELAY = 2 * 3600 + 60   # mybill reminds the owner 2 h after asking "Which supplier?"

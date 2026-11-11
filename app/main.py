@@ -322,6 +322,8 @@ async def owner_message_task(request: Request) -> Response:
         result = await dropship_intake.handle(p)
         if (batch_id := dropship_intake.needs_extraction(result)) is not None:
             await queue.enqueue_dropship_extract(batch_id)
+        if (collection_id := dropship_intake.needs_publishing(result)) is not None:
+            await queue.enqueue_dropship_publish(collection_id)
     except MybillRejected as exc:   # bad input: retrying won't help
         logger.error("Dropship intake rejected", extra={"fields": {"wa_message_id": p.get("wa_message_id"), "error": str(exc)}})
         return JSONResponse({"status": "rejected"})
@@ -344,6 +346,22 @@ async def dropship_extract_task(request: Request) -> Response:
         return JSONResponse({"status": "rejected"})
     except Exception as exc:
         logger.error("Dropship extraction failed", extra={"fields": {"batch_id": batch_id, "error": repr(exc)[:300]}})
+        return JSONResponse({"status": "retry"}, status_code=500)
+
+
+@app.post(queue.DROPSHIP_PUBLISH_PATH)
+async def dropship_publish_task(request: Request) -> Response:
+    """Cloud Tasks: post an approved dropship collection (mybill tells the owner the links). 500 = retry."""
+    if not await _task_authorized(request):
+        return Response(status_code=403)
+    collection_id = int((await request.json()).get("collection_id"))
+    try:
+        return JSONResponse(await dropship_intake.publish(collection_id))
+    except MybillRejected as exc:
+        logger.error("Dropship publishing rejected", extra={"fields": {"collection_id": collection_id, "error": str(exc)}})
+        return JSONResponse({"status": "rejected"})
+    except Exception as exc:
+        logger.error("Dropship publishing failed", extra={"fields": {"collection_id": collection_id, "error": repr(exc)[:300]}})
         return JSONResponse({"status": "retry"}, status_code=500)
 
 
