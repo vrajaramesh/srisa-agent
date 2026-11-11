@@ -334,7 +334,10 @@ async def dropship_close_task(request: Request) -> Response:
     if not await _task_authorized(request):
         return Response(status_code=403)
     try:
-        return JSONResponse(await dropship_intake.close_quiet_batches())
+        result = await dropship_intake.close_quiet_batches()
+        if result.get("awaiting_supplier_ids"):   # check again when the 2 h reminder is due
+            await queue.enqueue_dropship_check(queue.REMINDER_DELAY)
+        return JSONResponse(result)
     except Exception as exc:
         logger.error("Dropship close failed", extra={"fields": {"error": repr(exc)[:300]}})
         return JSONResponse({"status": "retry"}, status_code=500)

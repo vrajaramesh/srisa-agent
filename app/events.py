@@ -51,6 +51,7 @@ class PaymentEvent(BaseModel):
     text: str | None = None
     button_text: str | None = None
     sections: list[dict[str, Any]] | None = None
+    image_url: str | None = None                  # sent just before the message (a list can't have an image header)
 
 
 def _first_name(name: str | None) -> str:
@@ -205,6 +206,8 @@ async def _handle_owner(event: PaymentEvent) -> dict[str, Any]:
         return {"status": "invalid"}
     if not await _first_time(event):
         return {"status": "duplicate"}
+    if event.image_url:
+        await whatsapp_client.send_image(to, event.image_url)   # best effort: the list still goes out without it
     if event.kind == "list" and event.sections:
         result = await whatsapp_client.send_list(to, event.text, event.button_text or "Choose", event.sections)
     else:

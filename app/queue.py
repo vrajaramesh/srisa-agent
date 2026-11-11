@@ -121,10 +121,20 @@ async def enqueue_owner(payloads: list[dict], background: BackgroundTasks) -> No
             await _create_http_task(OWNER_TASK_PATH, p)
         except Exception:
             logger.exception("Failed to enqueue owner message", extra={"fields": {"wa_message_id": p.get("wa_message_id")}})
+    await enqueue_dropship_check(delay)
+
+
+REMINDER_DELAY = 2 * 3600 + 60   # mybill reminds the owner 2 h after asking "Which supplier?"
+
+
+async def enqueue_dropship_check(delay_seconds: int) -> None:
+    """A delayed call to mybill's process-batches (closes quiet posts, sends due supplier reminders). Never raises."""
+    if not get_settings().use_cloud_tasks:
+        return   # local runs: _owner_locally closes the batch itself
     try:
-        await _create_http_task(DROPSHIP_CLOSE_PATH, {}, delay)
+        await _create_http_task(DROPSHIP_CLOSE_PATH, {}, delay_seconds)
     except Exception:
-        logger.exception("Failed to enqueue dropship close")
+        logger.exception("Failed to enqueue dropship check")
 
 
 async def enqueue_comments(comment_ids: Iterable[str], background: BackgroundTasks) -> None:
