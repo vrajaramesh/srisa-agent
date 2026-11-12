@@ -196,11 +196,11 @@ class MybillClient:
         return await self._request("POST", "/api/agent/dropship/extract", json={"batch_id": batch_id}, timeout=290)
 
     async def dropship_ask_availability(self, item_code: str, conversation_id: str, customer_name: str | None,
-                                        customer_phone: str | None) -> dict[str, Any]:
-        """Ask the owner(s) whether a dropship variant is still available (Yes / No buttons)."""
+                                        customer_phone: str | None, quantity: int = 1) -> dict[str, Any]:
+        """Ask the collection's owner whether a dropship variant is still available (Yes / No buttons)."""
         return await self._request("POST", "/api/agent/dropship/availability", json={
             "item_code": item_code, "conversation_id": conversation_id, "customer_name": customer_name,
-            "customer_phone": customer_phone})
+            "customer_phone": customer_phone, "quantity": quantity})
 
     async def dropship_sold_out(self, item_code: str) -> dict[str, Any]:
         return await self._request("POST", f"/api/agent/dropship/items/{item_code}/sold-out")

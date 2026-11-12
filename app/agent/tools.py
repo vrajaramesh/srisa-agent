@@ -1018,7 +1018,13 @@ async def check_dropship_availability(ctx: ToolContext, args: dict[str, Any]) ->
     code = str(args.get("code") or "").strip().upper()
     if not code or ctx.mybill is None:
         return {"error": "invalid_input", "detail": "code of the variant, e.g. MGP1111-07"}
-    if not await dropship_flow.buy(ctx, code):
+    try:
+        qty = int(args.get("quantity") or 1)
+    except (TypeError, ValueError):
+        qty = 1
+    if not 1 <= qty <= dropship_flow.MAX_PIECES:
+        return {"error": "invalid_input", "detail": f"quantity 1-{dropship_flow.MAX_PIECES}"}
+    if not await dropship_flow.buy(ctx, code, qty):
         return {"error": "send_failed"}
     return {"ok": True, "note": "She was told we're checking availability; the system messages her when the team answers. "
                                 "Don't ask for payment or add it to the cart now."}
@@ -1285,8 +1291,10 @@ TOOLS: list[Tool] = [
           "required": ["quantity"]}, set_cart_item, SHOPPING | frozenset({SIZING, CUSTOMISE, ADDRESS, CONFIRM})),
     Tool("check_dropship_availability",
          "Dropship variant (code like MGP1111-07) she wants to buy: our team confirms it's in stock before she can order. "
-         "Call it instead of set_cart_item for dropship codes; she is told we're checking.",
-         {"type": "object", "properties": {"code": {"type": "string"}}, "required": ["code"]},
+         "Call it instead of set_cart_item for dropship codes, once per code with the pieces she wants (e.g. "
+         "\"07-2, 01-1\" = MGP1111-07 quantity 2 and MGP1111-01 quantity 1); she is told we're checking.",
+         {"type": "object", "properties": {"code": {"type": "string"}, "quantity": {"type": "integer", "minimum": 1}},
+          "required": ["code"]},
          check_dropship_availability, SHOPPING | frozenset({CUSTOMISE, ADDRESS, CONFIRM})),
     Tool("remove_cart_item",
          "Remove a line from her cart (item code or product_id, plus size for readymade).",

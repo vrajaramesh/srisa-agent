@@ -29,7 +29,6 @@ from app.models import Conversation, Message
 logger = logging.getLogger(__name__)
 
 BUY, OTHERS = "dsbuy:", "dsothers:"
-NUMBER = re.compile(r"^\s*#?\s*(\d{1,3})\s*$")
 ALL = re.compile(r"(?i)^\s*(all|show all|all photos|all colou?rs|send all)\s*[.!]*\s*$")
 STATE_TTL = timedelta(hours=24)
 CHECKING_TTL = timedelta(minutes=45)
@@ -127,35 +126,149 @@ async def send_item(ctx: tools.ToolContext, collection: dict[str, Any], item: di
     return ok
 
 
-async def buy(ctx: tools.ToolContext, item_code: str) -> bool:
-    """Ask the owner(s) whether it's available; tell her we're checking."""
+def _pending(st: dict[str, Any]) -> dict[str, int]:
+    """Variants waiting for the owner's Yes / No: {CODE: pieces} (older states kept one "item")."""
+    if st.get("pending"):
+        return {k.upper(): int(v) for k, v in st["pending"].items()}
+    if st.get("step") == "awaiting_owner" and st.get("item"):
+        return {st["item"].upper(): 1}
+    return {}
+
+
+def _qty_text(code: str, qty: int) -> str:
+    return f"{code} × {qty}" if qty > 1 else code
+
+
+def _join(parts: list[str]) -> str:
+    return parts[0] if len(parts) == 1 else ", ".join(parts[:-1]) + " and " + parts[-1]
+
+
+async def _ask_owner(ctx: tools.ToolContext, item_code: str, qty: int) -> bool:
+    """mybill asks the collection's owner "Is X available (n pieces)?"; False if that failed."""
     conv = ctx.conversation
-    if item_code in (_state(conv).get("confirmed") or []):
-        return await add_to_cart(ctx, item_code)
     try:
-        await ctx.mybill.dropship_ask_availability(item_code, str(conv.id), conv.customer_name, conv.external_user_id)
+        await ctx.mybill.dropship_ask_availability(item_code, str(conv.id), conv.customer_name, conv.external_user_id, qty)
     except Exception as exc:  # noqa: BLE001
         logger.error("Availability question not sent", extra={"fields": {"item": item_code, "error": repr(exc)[:200]}})
-        return await ctx.messenger.send_text("Sorry, something went wrong on our side – please try again in a minute 🙏")
-    _save(conv, step="awaiting_owner", item=item_code, asked_at=_now().isoformat())
-    ctx.actions.append({"action": "dropship_availability_asked", "code": item_code})
-    return await ctx.messenger.send_text(f"Great choice! 😊 Let me quickly confirm {item_code} is in stock – "
-                                         "I'll message you in a few minutes 🙏")
+        return False
+    st = _state(conv)
+    _save(conv, step="awaiting_owner", pending={**_pending(st), item_code.upper(): qty}, item=None,
+          asked_at=_now().isoformat())
+    ctx.actions.append({"action": "dropship_availability_asked", "code": item_code, "quantity": qty})
+    return True
 
 
-async def add_to_cart(ctx: tools.ToolContext, item_code: str) -> bool:
-    """Owner confirmed: one piece in her cart, then the normal flow (address → summary)."""
-    result = await tools.set_cart_item(ctx, {"code": item_code, "quantity": 1})
+async def buy(ctx: tools.ToolContext, item_code: str, qty: int = 1) -> bool:
+    """Ask the owner whether it's available; tell her we're checking."""
+    return await buy_many(ctx, [(item_code.upper(), qty)])
+
+
+async def buy_many(ctx: tools.ToolContext, picks: list[tuple[str, int]]) -> bool:
+    """She wants these variants (code, pieces): already confirmed ones go straight to the cart, the others are asked."""
+    confirmed = {c.upper() for c in _state(ctx.conversation).get("confirmed") or []}
+    asked, added = [], []
+    for code, qty in picks:
+        if code in confirmed:
+            if await _cart_add(ctx, code, qty):
+                added.append(_qty_text(code, qty))
+            continue
+        if not await _ask_owner(ctx, code, qty):
+            return await ctx.messenger.send_text("Sorry, something went wrong on our side – please try again in a minute 🙏")
+        asked.append(_qty_text(code, qty))
+    if asked:
+        return await ctx.messenger.send_text(f"Great choice! 😊 Let me quickly confirm {_join(asked)} "
+                                             f"{'is' if len(asked) == 1 else 'are'} in stock – I'll message you in a few minutes 🙏")
+    return await _proceed(ctx, f"✅ {_join(added)} added to your order.") if added else True
+
+
+async def _cart_add(ctx: tools.ToolContext, item_code: str, qty: int) -> bool:
+    result = await tools.set_cart_item(ctx, {"code": item_code, "quantity": qty})
     if result.get("error"):
         logger.warning("Dropship cart failed", extra={"fields": {"item": item_code, "error": result}})
-        return await ctx.messenger.send_text(f"✅ Good news – {item_code} is available! Our team will help you place the order shortly 🙏")
+        return False
+    return True
+
+
+async def _proceed(ctx: tools.ToolContext, lead: str) -> bool:
+    """Nothing left to check: the normal flow (address → summary)."""
     done = await tools.finish_cart(ctx, {})
+    if done.get("error"):
+        return await ctx.messenger.send_text(f"{lead}\nOur team will help you place the order shortly 🙏")
     if done.get("stage") == flow.CONFIRM:   # her address is already saved: straight to the summary
         summary = await tools.send_order_summary(ctx, {})
         return not summary.get("error")
     return await ctx.messenger.send_text(
-        f"✅ Good news – {item_code} is available!\nPlease send your *name, full address and pincode* "
-        "and I'll send the order summary with the delivery charge.")
+        f"{lead}\nPlease send your *name, full address and pincode* and I'll send the order summary with the delivery charge.")
+
+
+async def add_to_cart(ctx: tools.ToolContext, item_code: str, qty: int = 1) -> bool:
+    """Owner confirmed: the pieces in her cart, then the normal flow (address → summary)."""
+    if not await _cart_add(ctx, item_code, qty):
+        return await ctx.messenger.send_text(f"✅ Good news – {item_code} is available! Our team will help you place the order shortly 🙏")
+    return await _proceed(ctx, f"✅ Good news – {_qty_text(item_code, qty)} {'is' if qty == 1 else 'are'} available!")
+
+
+# Her choice in one message: "07-2 sarees, 01-1 saree", "07 x 2 and 01", "KSS1211-07 2", "07, 09".
+_PICK = re.compile(
+    r"^\s*(?:([A-Z]{2,}[A-Z0-9]*?\d+[A-Z]?)\s*-\s*)?#?(\d{1,3})"
+    r"(?:\s*(?:-|x|×|\*|:|=|–)\s*(\d{1,2})|\s+(\d{1,2}))?"
+    r"\s*(sarees?|saris?|pcs?|pieces?|nos?|qty|suits?|sets?)?\s*\.?\s*$", re.IGNORECASE)
+_SPLIT = re.compile(r"\s*(?:,|;|\n|&|\band\b|\+)\s*", re.IGNORECASE)
+MAX_PIECES = 20
+
+
+def parse_picks(text: str, collection: dict[str, Any]) -> list[tuple[str, int, bool]] | None:
+    """[(ITEM CODE, pieces, pieces given)] if the whole message is a list of numbers / codes with optional pieces,
+    else None. Codes of another collection don't count."""
+    parts = [p for p in _SPLIT.split(text or "") if p.strip()]
+    if not parts:
+        return None
+    out = []
+    for part in parts:
+        m = _PICK.match(part)
+        if not m:
+            return None
+        prefix, num, qty = m.group(1), int(m.group(2)), m.group(3) or m.group(4)
+        if m.group(5) and not qty:   # "2 sarees": a count, not a colour number - the AI asks which
+            return None
+        if prefix and prefix.upper() != str(collection["code"]).upper():
+            return None
+        pieces = int(qty) if qty else 1
+        if not 1 <= pieces <= MAX_PIECES:
+            return None
+        out.append((f"{collection['code']}-{num:02d}".upper(), pieces, qty is not None))
+    return out
+
+
+async def choose(ctx: tools.ToolContext, collection: dict[str, Any], picks: list[tuple[str, int, bool]]) -> bool:
+    """One number without pieces: show it with Buy. Several, or with pieces: ask the owner for all of them."""
+    if len(picks) == 1 and not picks[0][2]:
+        item = _find(collection, picks[0][0])
+        if item:
+            return await send_item(ctx, collection, item)
+        return await ctx.messenger.send_text(
+            f"I couldn't find number {picks[0][0].rsplit('-', 1)[-1]} – reply *ALL* to see every colour with its number.")
+    wanted: dict[str, int] = {}
+    missing, sold = [], []
+    for code, qty, _ in picks:
+        item = _find(collection, code)
+        if item is None:
+            missing.append(code.rsplit("-", 1)[-1])
+        elif not item.get("available"):
+            sold.append(code)
+        else:
+            wanted[code] = wanted.get(code, 0) + qty
+    notes = []
+    if missing:
+        notes.append(f"I couldn't find number{'s' if len(missing) > 1 else ''} {', '.join(missing)}")
+    if sold:
+        notes.append(f"{_join(sold)} {'is' if len(sold) == 1 else 'are'} sold out 😔")
+    if notes and not await ctx.messenger.send_text(" · ".join(notes) + (" – reply *ALL* to see what's available." if not wanted else "")):
+        return False
+    if not wanted:
+        return True
+    _save(ctx.conversation, collection=collection["code"])
+    return await buy_many(ctx, list(wanted.items()))
 
 
 # ── the worker's entry point ─────────────────────────────────────────────────
@@ -183,6 +296,8 @@ async def path(ctx: tools.ToolContext, pending: list[Message]) -> str | None:
         if collection is None:
             continue
         if item_code:
+            if (picks := parse_picks(text, collection)) and (len(picks) > 1 or picks[0][2]):   # codes with pieces
+                return _ok(ctx, await choose(ctx, collection, picks))
             item = _find(collection, item_code)
             return _ok(ctx, await send_item(ctx, collection, item)) if item else None
         return _ok(ctx, await send_intro(ctx, collection))
@@ -193,12 +308,8 @@ async def path(ctx: tools.ToolContext, pending: list[Message]) -> str | None:
             return None
         if ALL.match(text):
             return _ok(ctx, await send_all(ctx, collection))
-        if m := NUMBER.match(text):
-            item = _find(collection, f"{collection['code']}-{int(m.group(1)):02d}")
-            if item:
-                return _ok(ctx, await send_item(ctx, collection, item))
-            return _ok(ctx, await ctx.messenger.send_text(
-                f"I couldn't find number {m.group(1)} – reply *ALL* to see every colour with its number."))
+        if not reply_id and (picks := parse_picks(text, collection)):   # "07", "07-2 sarees, 01-1 saree"
+            return _ok(ctx, await choose(ctx, collection, picks))
         if st.get("step") == "awaiting_owner":
             try:
                 asked = datetime.fromisoformat(st.get("asked_at") or "")
@@ -206,7 +317,7 @@ async def path(ctx: tools.ToolContext, pending: list[Message]) -> str | None:
                 asked = _now() - CHECKING_TTL
             if _now() - asked < CHECKING_TTL and not reply_id:
                 return _ok(ctx, await ctx.messenger.send_text(
-                    f"Still checking {st.get('item')} for you – I'll message you as soon as I hear back 🙏"))
+                    f"Still checking {_join(list(_pending(st)) or ['it'])} for you – I'll message you as soon as I hear back 🙏"))
     return None
 
 
@@ -253,45 +364,67 @@ async def owner_answer(reply_id: str, owner: str) -> dict[str, Any]:
         if conv is None:
             return {"handled": False, "reason": "unknown_conversation"}
         st = _state(conv)
-        if st.get("step") != "awaiting_owner" or (st.get("item") or "").upper() != item_code.upper():
+        pending = _pending(st)
+        code = item_code.upper()
+        if code not in pending:
             await whatsapp_client.send_text(owner, f"👍 {item_code}: already answered (or she chose another one).")
             return {"handled": True, "action": "stale"}
+        qty = pending.pop(code)
         base = mybill_client.get_client()
         mybill = mybill_client.FirmClient(base, conv) if base is not None else None
         ctx = tools.ToolContext(conversation=conv, mybill=mybill, messenger=WorkerMessenger(session, conv),
                                 store=WorkerStore(session), draft=await repo.open_draft(session, conversation_id))
+        still = f"\nStill checking {_join(list(pending))} – I'll message you soon 🙏" if pending else ""
         if answer == "y":
-            _save(conv, step="confirmed", confirmed=sorted({*(st.get("confirmed") or []), item_code}))
-            sent = await add_to_cart(ctx, item_code)
-            await whatsapp_client.send_text(owner, f"👍 {item_code}: customer told it's available"
+            confirmed = sorted({*(st.get("confirmed") or []), code})
+            _save(conv, step="awaiting_owner" if pending else "confirmed", pending=pending, item=None, confirmed=confirmed)
+            if pending:
+                added = await _cart_add(ctx, code, qty)
+                sent = await ctx.messenger.send_text(f"✅ {_qty_text(code, qty)} {'is' if qty == 1 else 'are'} available"
+                                                     + (" and added to your order." if added else ".") + still)
+            else:
+                sent = await add_to_cart(ctx, code, qty)
+            await whatsapp_client.send_text(owner, f"👍 {_qty_text(code, qty)}: customer told it's available"
                                             + ("" if sent else " – but WhatsApp couldn't reach her (24 h window?)"))
             return {"handled": True, "action": "confirmed", "sent": sent}
         try:
-            await ctx.mybill.dropship_sold_out(item_code)
+            await ctx.mybill.dropship_sold_out(code)
         except Exception as exc:  # noqa: BLE001
-            logger.error("Sold-out not saved", extra={"fields": {"item": item_code, "error": repr(exc)[:200]}})
-        collection = await _collection(ctx, item_code)
-        others = [i for i in _available(collection or {}) if i["item_code"].upper() != item_code.upper()][:3]
-        _save(conv, step="browsing", item=None)
-        sent = await ctx.messenger.send_text(
-            f"Sorry 😔 {item_code} has just sold out." + (" Here are some colours still available:" if others else
-                                                          " Reply *ALL* to see what's still available."))
-        for item in others:
-            sent = sent and await ctx.messenger.send_image(item["image_url"], caption(item))
-        if others:
-            sent = sent and await ctx.messenger.send_text("Reply with the number you like (e.g. "
-                                                          f"*{_variant_label(others[0])}*) or *ALL* to see every colour.")
-        await whatsapp_client.send_text(owner, f"👍 {item_code}: marked SOLD OUT and the customer was offered other colours"
+            logger.error("Sold-out not saved", extra={"fields": {"item": code, "error": repr(exc)[:200]}})
+        _save(conv, step="awaiting_owner" if pending else "browsing", pending=pending, item=None)
+        if pending:   # other colours still being checked
+            sent = await ctx.messenger.send_text(f"Sorry 😔 {code} has just sold out.{still}")
+        elif any(c != code for c in st.get("confirmed") or []) and draft_has_dropship(ctx):
+            sent = await _proceed(ctx, f"Sorry 😔 {code} has just sold out – I've kept the others in your order.")
+        else:
+            collection = await _collection(ctx, code)
+            others = [i for i in _available(collection or {}) if i["item_code"].upper() != code][:3]
+            sent = await ctx.messenger.send_text(
+                f"Sorry 😔 {code} has just sold out." + (" Here are some colours still available:" if others else
+                                                         " Reply *ALL* to see what's still available."))
+            for item in others:
+                sent = sent and await ctx.messenger.send_image(item["image_url"], caption(item))
+            if others:
+                sent = sent and await ctx.messenger.send_text("Reply with the number you like (e.g. "
+                                                              f"*{_variant_label(others[0])}*) or *ALL* to see every colour.")
+        await whatsapp_client.send_text(owner, f"👍 {code}: marked SOLD OUT and the customer was told"
                                         + ("" if sent else " – but WhatsApp couldn't reach her"))
         return {"handled": True, "action": "sold_out", "sent": sent}
+
+
+def draft_has_dropship(ctx: tools.ToolContext) -> bool:
+    """Her cart already has confirmed dropship lines."""
+    return any((line.get("kind") == "DROPSHIP") for line in (ctx.draft.lines if ctx.draft else None) or [])
 
 
 def facts(conversation: Conversation) -> list[str]:
     """Lines for the AI's facts block while a dropship purchase is in progress."""
     st = _state(conversation)
-    if st.get("step") == "awaiting_owner":
-        return [f"- Dropship: she tapped Buy on {st.get('item')}; we are checking availability with our team. "
-                "Don't add it to the cart or ask for payment yet - tell her we'll confirm shortly."]
+    if st.get("step") == "awaiting_owner" and (pending := _pending(st)):
+        return [f"- Dropship: we are checking availability with our team for "
+                f"{', '.join(_qty_text(c, q) for c, q in pending.items())}. Don't add those to the cart or ask for payment "
+                "yet - tell her we'll confirm shortly."
+                + (f" Already confirmed: {', '.join(st['confirmed'])}." if st.get("confirmed") else "")]
     if st.get("confirmed"):
         return [f"- Dropship: availability confirmed for {', '.join(st['confirmed'])} - continue her order "
                 "(address → summary)."]
