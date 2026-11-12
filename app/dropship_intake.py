@@ -44,19 +44,39 @@ async def owner_numbers() -> set[str]:
     return cached | get_settings().owner_number_set
 
 
+_supplier_cache: tuple[float, set[str]] = (0.0, set())
+
+
+async def supplier_numbers() -> set[str]:
+    """Active suppliers' WhatsApp numbers from mybill (cached 1 min): they answer "Is it available?" and are never
+    answered by the AI. If mybill can't be reached, the last list is kept."""
+    global _supplier_cache
+    fetched_at, cached = _supplier_cache
+    if time.monotonic() - fetched_at > OWNER_CACHE_SECONDS:
+        try:
+            numbers = await _client().dropship_supplier_numbers()
+            cached = {"".join(ch for ch in n if ch.isdigit()) for n in numbers}
+            _supplier_cache = (time.monotonic(), cached)
+        except Exception as exc:  # noqa: BLE001 - routing must never fail the webhook
+            logger.warning("Supplier numbers not refreshed", extra={"fields": {"error": repr(exc)[:200]}})
+            _supplier_cache = (time.monotonic() - OWNER_CACHE_SECONDS + 10, cached)
+    return cached
+
+
 def cached_owner_numbers() -> set[str]:
     """The last known owner numbers without a network call (for reports / follow-ups)."""
     from app.config import get_settings
     return _owner_cache[1] | get_settings().owner_number_set
 
 
-def payload(msg: IncomingMessage) -> dict[str, Any]:
-    """What the task needs from one webhook message (the photo is downloaded in the task, not in the webhook)."""
+def payload(msg: IncomingMessage, role: str = "owner") -> dict[str, Any]:
+    """What the task needs from one webhook message (the photo is downloaded in the task, not in the webhook).
+    role: owner (forwarded posts, commands) or supplier (answers to "Is it available?")."""
     raw = msg.raw or {}
     image = raw.get("image") or {}
     return {"wa_message_id": msg.id, "from": msg.from_, "type": msg.type, "text": msg.text,
             "caption": image.get("caption"), "media_id": image.get("id"), "mime_type": image.get("mime_type"),
-            "timestamp": msg.timestamp, "reply_id": msg.reply_id}
+            "timestamp": msg.timestamp, "reply_id": msg.reply_id, "role": role}
 
 
 def _client() -> Any:
@@ -70,6 +90,8 @@ async def handle(p: dict[str, Any]) -> dict[str, Any]:
     """One owner message. Raises on a temporary failure (the Cloud Task retries; mybill ignores duplicates)."""
     mybill = _client()
     text = p.get("text") or ""
+    if p.get("role") == "supplier" and not (p.get("reply_id") or "").startswith("avail:"):
+        return await mybill.dropship_supplier_message(p["from"], text or p.get("caption"))   # forwarded to the owner
     if (p.get("reply_id") or "").startswith("avail:"):   # Yes / No: is a dropship variant still available?
         from app import dropship_flow
         return await dropship_flow.owner_answer(p["reply_id"], p["from"])

@@ -2,7 +2,7 @@
 
 - A DROPSHIP collection code (or one of its item codes) in her message, or the ad / post that brought her: intro
   (title, description, price + shipping, "N colours available"), then every AVAILABLE variant as its own photo (the
-  code is stamped on it; caption = the code, e.g. MGP1111-07 - no collage), then "Reply with the number (e.g. 07)".
+  number 01, 02 ... is stamped on it and is the caption - no collage), then "Reply with the number (e.g. 07)".
 - "ALL": the same photos again.
 - A number (07) or a full code (MGP1111-07): that photo, then the buttons 🛒 Buy this / 🔙 See others.
 - 🛒 Buy this: mybill asks the owner(s) "Is MGP1111-07 available with {supplier}?" [Yes] [No]; she is told we're checking.
@@ -67,8 +67,8 @@ def _variant_label(item: dict[str, Any]) -> str:
 
 
 def caption(item: dict[str, Any]) -> str:
-    """Just the code (MGP1111-07) - it is stamped on the photo too."""
-    return item.get("item_code") or ""
+    """Just the variant number (07) - the same number is stamped on the photo."""
+    return _variant_label(item)
 
 
 def price_line(collection: dict[str, Any]) -> str:
@@ -147,10 +147,15 @@ async def _ask_owner(ctx: tools.ToolContext, item_code: str, qty: int) -> bool:
     """mybill asks the collection's owner "Is X available (n pieces)?"; False if that failed."""
     conv = ctx.conversation
     try:
-        await ctx.mybill.dropship_ask_availability(item_code, str(conv.id), conv.customer_name, conv.external_user_id, qty)
+        result = await ctx.mybill.dropship_ask_availability(item_code, str(conv.id), conv.customer_name,
+                                                            conv.external_user_id, qty)
     except Exception as exc:  # noqa: BLE001
         logger.error("Availability question not sent", extra={"fields": {"item": item_code, "error": repr(exc)[:200]}})
         return False
+    if (result or {}).get("via") == "supplier":   # the owner is asked if the supplier stays silent
+        from app import queue
+        from app.config import get_settings
+        await queue.enqueue_supplier_timeout(conv.id, item_code.upper(), get_settings().dropship_supplier_reply_minutes * 60)
     st = _state(conv)
     _save(conv, step="awaiting_owner", pending={**_pending(st), item_code.upper(): qty}, item=None,
           asked_at=_now().isoformat())
@@ -367,7 +372,7 @@ async def owner_answer(reply_id: str, owner: str) -> dict[str, Any]:
         pending = _pending(st)
         code = item_code.upper()
         if code not in pending:
-            await whatsapp_client.send_text(owner, f"👍 {item_code}: already answered (or she chose another one).")
+            await whatsapp_client.send_text(owner, f"👍 {item_code}: already answered (or the customer chose another one) – thank you!")
             return {"handled": True, "action": "stale"}
         qty = pending.pop(code)
         base = mybill_client.get_client()
@@ -384,8 +389,9 @@ async def owner_answer(reply_id: str, owner: str) -> dict[str, Any]:
                                                      + (" and added to your order." if added else ".") + still)
             else:
                 sent = await add_to_cart(ctx, code, qty)
-            await whatsapp_client.send_text(owner, f"👍 {_qty_text(code, qty)}: customer told it's available"
-                                            + ("" if sent else " – but WhatsApp couldn't reach her (24 h window?)"))
+            if await _answered(ctx, code, qty, "y", owner) != "supplier":   # mybill thanks a supplier, tells the owner
+                await whatsapp_client.send_text(owner, f"👍 {_qty_text(code, qty)}: customer told it's available"
+                                                + ("" if sent else " – but WhatsApp couldn't reach them (24 h window?)"))
             return {"handled": True, "action": "confirmed", "sent": sent}
         try:
             await ctx.mybill.dropship_sold_out(code)
@@ -407,9 +413,43 @@ async def owner_answer(reply_id: str, owner: str) -> dict[str, Any]:
             if others:
                 sent = sent and await ctx.messenger.send_text("Reply with the number you like (e.g. "
                                                               f"*{_variant_label(others[0])}*) or *ALL* to see every colour.")
-        await whatsapp_client.send_text(owner, f"👍 {code}: marked SOLD OUT and the customer was told"
-                                        + ("" if sent else " – but WhatsApp couldn't reach her"))
+        if await _answered(ctx, code, qty, "n", owner) != "supplier":
+            await whatsapp_client.send_text(owner, f"👍 {code}: marked SOLD OUT and the customer was told"
+                                            + ("" if sent else " – but WhatsApp couldn't reach them"))
         return {"handled": True, "action": "sold_out", "sent": sent}
+
+
+async def _answered(ctx: tools.ToolContext, code: str, qty: int, answer: str, by: str) -> str:
+    """Tell mybill who answered: a supplier is thanked and the owner informed there. Returns supplier|owner."""
+    try:
+        result = await ctx.mybill.dropship_answered(code, qty, answer, by, ctx.conversation.customer_name)
+        return (result or {}).get("role") or "owner"
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Availability answer not reported", extra={"fields": {"item": code, "error": repr(exc)[:200]}})
+        return "owner"
+
+
+async def supplier_timeout(conversation_id: uuid.UUID, item_code: str) -> dict[str, Any]:
+    """The supplier was asked dropship_supplier_reply_minutes ago: if nobody has answered yet, ask the owner."""
+    from app import repositories as repo
+    from app.db import get_sessionmaker
+    async with get_sessionmaker()() as session, session.begin():
+        await repo.lock_conversation(session, conversation_id)
+        conv = await session.get(Conversation, conversation_id)
+        if conv is None:
+            return {"status": "unknown_conversation"}
+        st = _state(conv)
+        pending, code = _pending(st), item_code.upper()
+        if code not in pending or code in (st.get("escalated") or []):
+            return {"status": "answered"}
+        base = mybill_client.get_client()
+        if base is None:
+            return {"status": "no_mybill"}
+        await mybill_client.FirmClient(base, conv).dropship_ask_availability(
+            code, str(conv.id), conv.customer_name, conv.external_user_id, pending[code], escalate=True)
+        _save(conv, escalated=sorted({*(st.get("escalated") or []), code}))
+        logger.info("DROPSHIP_SUPPLIER_SILENT", extra={"fields": {"item": code}})
+        return {"status": "owner_asked"}
 
 
 def draft_has_dropship(ctx: tools.ToolContext) -> bool:

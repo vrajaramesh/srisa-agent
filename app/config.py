@@ -118,6 +118,12 @@ class Settings(DatabaseSettings, AgentSettings):
     owner_numbers: str = ""
     # A forwarded post is closed this many seconds after its last message (mybill dropship.intake.idle-seconds).
     dropship_idle_seconds: int = 60
+    # Dropship availability: asked to the supplier first with this approved UTILITY template (image header, body
+    # {{1}} supplier name, {{2}} what, {{3}} pieces, quick replies "Yes, available" / "No, sold out"); the owner is
+    # asked if the supplier hasn't answered after dropship_supplier_reply_minutes (or the template can't be sent).
+    dropship_supplier_template: str = "dropship_stock_check"
+    dropship_supplier_template_lang: str = "en"
+    dropship_supplier_reply_minutes: int = 15
     staff_alert_template: str = "staff_alert"
     staff_alert_template_lang: str = "en"
     # AUTHENTICATION template for website password-reset codes (srisafabrics.com "Forgot password").

@@ -105,9 +105,12 @@ async def receive_webhook(request: Request, background: BackgroundTasks) -> Resp
 
     parsed = parse_webhook(payload)
     owner = await dropship_intake.owner_numbers() if parsed.messages else set()
-    owner_payloads = [dropship_intake.payload(m) for m in parsed.messages if m.from_ in owner]
+    suppliers = (await dropship_intake.supplier_numbers()) - owner if parsed.messages else set()
+    owner_payloads = [dropship_intake.payload(m, "owner" if m.from_ in owner else "supplier")
+                      for m in parsed.messages if m.from_ in owner or m.from_ in suppliers]
     try:
-        conversation_ids = await store_webhook(parsed, owner)   # owner messages are stored too, but never answered
+        # owner and supplier messages are stored too, but never answered by the AI
+        conversation_ids = await store_webhook(parsed, owner | suppliers)
     except (SQLAlchemyError, OSError):
         # Not saved, so ask Meta to redeliver later instead of losing the message.
         logger.exception("Failed to store webhook")
@@ -346,6 +349,23 @@ async def dropship_extract_task(request: Request) -> Response:
         return JSONResponse({"status": "rejected"})
     except Exception as exc:
         logger.error("Dropship extraction failed", extra={"fields": {"batch_id": batch_id, "error": repr(exc)[:300]}})
+        return JSONResponse({"status": "retry"}, status_code=500)
+
+
+@app.post(queue.DROPSHIP_SUPPLIER_TIMEOUT_PATH)
+async def dropship_supplier_timeout_task(request: Request) -> Response:
+    """Cloud Tasks, 15 min after the supplier was asked: still no answer → ask the owner. 500 = retry."""
+    if not await _task_authorized(request):
+        return Response(status_code=403)
+    from app import dropship_flow
+    body = await request.json()
+    try:
+        return JSONResponse(await dropship_flow.supplier_timeout(uuid.UUID(body["conversation_id"]), body["item_code"]))
+    except MybillRejected as exc:
+        logger.error("Supplier timeout rejected", extra={"fields": {"item": body.get("item_code"), "error": str(exc)}})
+        return JSONResponse({"status": "rejected"})
+    except Exception as exc:
+        logger.error("Supplier timeout failed", extra={"fields": {"item": body.get("item_code"), "error": repr(exc)[:300]}})
         return JSONResponse({"status": "retry"}, status_code=500)
 
 

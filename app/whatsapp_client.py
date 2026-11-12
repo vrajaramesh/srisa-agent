@@ -181,6 +181,22 @@ async def send_template(to: str, name: str, language: str, body_params: list[str
     return await _post_messages(payload, action="send_template")
 
 
+async def send_template_buttons(to: str, name: str, language: str, image_url: str | None, body_params: list[str],
+                                payloads: list[str]) -> SendResult:
+    """An approved template with an IMAGE header and quick-reply buttons; payloads[i] comes back as the tapped
+    button's reply id (webhook type "button")."""
+    components: list[dict[str, Any]] = []
+    if image_url:
+        components.append({"type": "header", "parameters": [{"type": "image", "image": {"link": image_url}}]})
+    components.append({"type": "body", "parameters": [{"type": "text", "text": clip(p, 1000) or "-"} for p in body_params]})
+    for i, payload in enumerate(payloads):
+        components.append({"type": "button", "sub_type": "quick_reply", "index": str(i),
+                           "parameters": [{"type": "payload", "payload": payload}]})
+    payload_body = {"messaging_product": "whatsapp", "to": to, "type": "template", "template": {
+        "name": name, "language": {"code": language}, "components": components}}
+    return await _post_messages(payload_body, action="send_template_buttons")
+
+
 async def send_auth_code(to: str, name: str, language: str, code: str) -> SendResult:
     """An approved AUTHENTICATION template (one-time code + "Copy code" button)."""
     payload = {"messaging_product": "whatsapp", "to": to, "type": "template", "template": {

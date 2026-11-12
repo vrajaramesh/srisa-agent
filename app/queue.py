@@ -22,6 +22,7 @@ OWNER_TASK_PATH = "/tasks/owner-message"          # one owner message -> mybill 
 DROPSHIP_CLOSE_PATH = "/tasks/dropship-close"     # delayed: close forwarded posts that went quiet
 DROPSHIP_EXTRACT_PATH = "/tasks/dropship-extract"  # build the draft collection (AI) once the supplier is chosen
 DROPSHIP_PUBLISH_PATH = "/tasks/dropship-publish"  # post an approved collection on Instagram + Meta catalog
+DROPSHIP_SUPPLIER_TIMEOUT_PATH = "/tasks/dropship-supplier-timeout"  # delayed: supplier silent → ask the owner
 
 _tasks_client: tasks_v2.CloudTasksAsyncClient | None = None
 
@@ -149,6 +150,24 @@ async def enqueue_dropship_publish(collection_id: int) -> None:
         await _create_http_task(DROPSHIP_PUBLISH_PATH, {"collection_id": collection_id})
     except Exception:
         logger.exception("Failed to enqueue dropship publishing", extra={"fields": {"collection_id": collection_id}})
+
+
+async def _supplier_timeout_locally(conversation_id: uuid.UUID, item_code: str, delay_seconds: int) -> None:
+    from app import dropship_flow
+    await asyncio.sleep(delay_seconds)
+    await dropship_flow.supplier_timeout(conversation_id, item_code)
+
+
+async def enqueue_supplier_timeout(conversation_id: uuid.UUID, item_code: str, delay_seconds: int) -> None:
+    """A delayed check: if the supplier hasn't answered "Is it available?" by then, the owner is asked. Never raises."""
+    if not get_settings().use_cloud_tasks:
+        asyncio.create_task(_supplier_timeout_locally(conversation_id, item_code, delay_seconds))
+        return
+    try:
+        await _create_http_task(DROPSHIP_SUPPLIER_TIMEOUT_PATH,
+                                {"conversation_id": str(conversation_id), "item_code": item_code}, delay_seconds)
+    except Exception:
+        logger.exception("Failed to enqueue supplier timeout", extra={"fields": {"item": item_code}})
 
 
 REMINDER_DELAY = 2 * 3600 + 60   # mybill reminds the owner 2 h after asking "Which supplier?"

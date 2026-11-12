@@ -56,6 +56,11 @@ class PaymentEvent(BaseModel):
     supplier_name: str | None = None              # DROPSHIP order.paid: who ships it
     supplier_phone: str | None = None
     owner_phone: str | None = None                # DROPSHIP order.paid: the owner who forwarded the post
+    # kind "supplier_check": template to the supplier; if it can't be sent, text + buttons go to fallback_to (owners)
+    template_params: list[str] | None = None
+    button_payloads: list[str] | None = None
+    fallback_to: list[str] | None = None
+    fallback_image_url: str | None = None
 
 
 def _first_name(name: str | None) -> str:
@@ -234,6 +239,8 @@ async def _handle_owner(event: PaymentEvent) -> dict[str, Any]:
         return {"status": "invalid"}
     if not await _first_time(event):
         return {"status": "duplicate"}
+    if event.kind == "supplier_check":
+        return await _supplier_check(to, event)
     if event.image_url:
         await whatsapp_client.send_image(to, event.image_url)   # best effort: the list still goes out without it
     if event.kind == "list" and event.sections:
@@ -248,6 +255,28 @@ async def _handle_owner(event: PaymentEvent) -> dict[str, Any]:
         raise RuntimeError(f"owner message not sent: {result.error}")
     logger.info("OWNER_MESSAGE_SENT", extra={"fields": {"event_id": event.event_id, "kind": event.kind}})
     return {"status": "sent"}
+
+
+async def _supplier_check(to: str, event: PaymentEvent) -> dict[str, Any]:
+    """"Is it available?" to the supplier with the approved template. If WhatsApp refuses it (template not approved
+    yet, number not on WhatsApp...), the owner gets the question right away instead. Never raises."""
+    settings = get_settings()
+    result = await whatsapp_client.send_template_buttons(
+        to, settings.dropship_supplier_template, settings.dropship_supplier_template_lang, event.image_url,
+        event.template_params or [], event.button_payloads or [])
+    if result.ok:
+        logger.info("SUPPLIER_CHECK_SENT", extra={"fields": {"event_id": event.event_id}})
+        return {"status": "sent", "to": "supplier"}
+    logger.warning("Supplier check not sent - asking the owner", extra={"fields": {"event_id": event.event_id,
+                                                                                    "error": result.error}})
+    sent = 0
+    for owner in event.fallback_to or []:
+        if event.fallback_image_url:
+            await whatsapp_client.send_image(owner, event.fallback_image_url)
+        text = f"(Couldn't reach the supplier on WhatsApp)\n{event.text}"
+        if (await whatsapp_client.send_buttons(owner, text, event.buttons or [])).ok:
+            sent += 1
+    return {"status": "fallback", "owners": sent}
 
 
 async def _handle_courier(event: PaymentEvent) -> dict[str, Any]:

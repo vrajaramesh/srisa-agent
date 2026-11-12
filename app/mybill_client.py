@@ -196,11 +196,28 @@ class MybillClient:
         return await self._request("POST", "/api/agent/dropship/extract", json={"batch_id": batch_id}, timeout=290)
 
     async def dropship_ask_availability(self, item_code: str, conversation_id: str, customer_name: str | None,
-                                        customer_phone: str | None, quantity: int = 1) -> dict[str, Any]:
-        """Ask the collection's owner whether a dropship variant is still available (Yes / No buttons)."""
+                                        customer_phone: str | None, quantity: int = 1,
+                                        escalate: bool = False) -> dict[str, Any]:
+        """Ask whether a dropship variant is still available (Yes / No): the supplier first ({via: supplier}), the
+        collection's owner when escalate (supplier silent) or the supplier has no number ({via: owner})."""
         return await self._request("POST", "/api/agent/dropship/availability", json={
             "item_code": item_code, "conversation_id": conversation_id, "customer_name": customer_name,
-            "customer_phone": customer_phone, "quantity": quantity})
+            "customer_phone": customer_phone, "quantity": quantity, "escalate": escalate})
+
+    async def dropship_answered(self, item_code: str, quantity: int, answer: str, answered_by: str,
+                                customer_name: str | None) -> dict[str, Any]:
+        """Yes / No was tapped: mybill thanks a supplier and tells the owner. {role: supplier|owner}."""
+        return await self._request("POST", "/api/agent/dropship/availability-answered", json={
+            "item_code": item_code, "quantity": quantity, "answer": answer, "answered_by": answered_by,
+            "customer_name": customer_name})
+
+    async def dropship_supplier_numbers(self) -> list[str]:
+        """Active suppliers' WhatsApp numbers (digits with country code)."""
+        return (await self._get("/api/agent/dropship/supplier-numbers")).get("numbers") or []
+
+    async def dropship_supplier_message(self, from_: str, text: str | None) -> dict[str, Any]:
+        """A supplier's message that isn't a Yes / No tap: mybill forwards it to the owner."""
+        return await self._request("POST", "/api/agent/dropship/supplier-message", json={"from": from_, "text": text})
 
     async def dropship_sold_out(self, item_code: str) -> dict[str, Any]:
         return await self._request("POST", f"/api/agent/dropship/items/{item_code}/sold-out")
