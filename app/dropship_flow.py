@@ -1,9 +1,9 @@
 """Customer side of WhatsApp-forwarded dropship collections (mybill phase 6), as plain code before the AI:
 
 - A DROPSHIP collection code (or one of its item codes) in her message, or the ad / post that brought her: intro
-  (title, description, price + shipping, "N colours available"), the collage, then "Reply with a number (e.g. 07) to
-  see it up close, or type ALL to see every photo".
-- "ALL": every AVAILABLE variant's stamped photo, captioned "07 – Bottle green / red Kalamkari blouse".
+  (title, description, price + shipping, "N colours available"), then every AVAILABLE variant as its own photo (the
+  code is stamped on it; caption = the code, e.g. MGP1111-07 - no collage), then "Reply with the number (e.g. 07)".
+- "ALL": the same photos again.
 - A number (07) or a full code (MGP1111-07): that photo, then the buttons 🛒 Buy this / 🔙 See others.
 - 🛒 Buy this: mybill asks the owner(s) "Is MGP1111-07 available with {supplier}?" [Yes] [No]; she is told we're checking.
 - The owner's Yes: the variant goes into her cart and the normal order flow continues (address → summary → Confirm →
@@ -68,8 +68,8 @@ def _variant_label(item: dict[str, Any]) -> str:
 
 
 def caption(item: dict[str, Any]) -> str:
-    parts = [p for p in (item.get("colour"), item.get("secondary_desc")) if p]
-    return f"{_variant_label(item)} – {' / '.join(parts)}" if parts else _variant_label(item)
+    """Just the code (MGP1111-07) - it is stamped on the photo too."""
+    return item.get("item_code") or ""
 
 
 def price_line(collection: dict[str, Any]) -> str:
@@ -83,7 +83,7 @@ def price_line(collection: dict[str, Any]) -> str:
 # ── messages ─────────────────────────────────────────────────────────────────
 
 async def send_intro(ctx: tools.ToolContext, collection: dict[str, Any]) -> bool:
-    """Intro, collage, then how to choose. False if WhatsApp failed."""
+    """Intro, every available colour as its own photo with its code, then how to choose. False if WhatsApp failed."""
     available = _available(collection)
     lines = [f"*{collection['name']}*"]
     if collection.get("description"):
@@ -93,16 +93,10 @@ async def send_intro(ctx: tools.ToolContext, collection: dict[str, Any]) -> bool
     lines.append(f"🎨 {len(available)} colour{'s' if len(available) != 1 else ''} available")
     if not await ctx.messenger.send_text("\n".join(lines)):
         return False
-    if collection.get("collage_url"):
-        if not await ctx.messenger.send_image(collection["collage_url"], f"{collection['name']} – {collection['code']}"):
-            return False
-    example = _variant_label(available[0]) if available else "01"
-    if not await ctx.messenger.send_text(f"Reply with a number (e.g. *{example}*) to see it up close, or type *ALL* to see every photo."):
-        return False
     ctx.conversation.current_collection_code = collection["code"]
     _save(ctx.conversation, collection=collection["code"], step="browsing")
     ctx.actions.append({"action": "dropship_intro", "code": collection["code"]})
-    return True
+    return await send_all(ctx, collection)
 
 
 async def send_all(ctx: tools.ToolContext, collection: dict[str, Any]) -> bool:
@@ -112,7 +106,8 @@ async def send_all(ctx: tools.ToolContext, collection: dict[str, Any]) -> bool:
             return False
         if i < len(items) - 1:
             await asyncio.sleep(PHOTO_DELAY_SECONDS)   # keeps WhatsApp's order and avoids bursts
-    ok = await ctx.messenger.send_text("Reply with the number you like (e.g. *07*) to buy it 😊")
+    example = _variant_label(items[0]) if items else "01"
+    ok = await ctx.messenger.send_text(f"Reply with the number of the one you like (e.g. *{example}*) to buy it 😊")
     ctx.actions.append({"action": "dropship_all", "code": collection["code"], "photos": len(items)})
     return ok
 
@@ -120,7 +115,7 @@ async def send_all(ctx: tools.ToolContext, collection: dict[str, Any]) -> bool:
 async def send_item(ctx: tools.ToolContext, collection: dict[str, Any], item: dict[str, Any]) -> bool:
     if not item.get("available"):
         return await ctx.messenger.send_text(f"Sorry, {item['item_code']} is sold out 😔 Reply *ALL* to see the colours available.")
-    if not await ctx.messenger.send_image(item["image_url"], f"{item['item_code']} · {caption(item)}"
+    if not await ctx.messenger.send_image(item["image_url"], caption(item)
                                           + (f" · {price_line(collection)}" if price_line(collection) else "")):
         return False
     ok = await ctx.messenger.send_buttons(
