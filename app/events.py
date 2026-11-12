@@ -55,6 +55,7 @@ class PaymentEvent(BaseModel):
     buttons: list[dict[str, Any]] | None = None   # kind "buttons": up to 3 reply buttons [{id, title}]
     supplier_name: str | None = None              # DROPSHIP order.paid: who ships it
     supplier_phone: str | None = None
+    owner_phone: str | None = None                # DROPSHIP order.paid: the owner who forwarded the post
 
 
 def _first_name(name: str | None) -> str:
@@ -205,16 +206,20 @@ OWNER_MESSAGE = "owner.message"
 
 async def _tell_owners_paid(event: PaymentEvent) -> None:
     """A dropship order is paid: "✅ {code} paid by {customer}. Order from {supplier} ({phone}). Ship to: {address}"
-    to the owner numbers (the people who forward the supplier posts). Best effort."""
+    to the owner who forwarded that post (each owner number is its own user); every owner number only when mybill
+    doesn't know who (a collection made by hand). Best effort."""
     from app import dropship_intake
     who = (event.customer_name or "a customer") + (f" (+{event.customer_phone.lstrip('+')})" if event.customer_phone else "")
     supplier = (event.supplier_name or "the supplier") + (f" ({event.supplier_phone})" if event.supplier_phone else "")
     text = (f"✅ {event.items or event.order_no} paid by {who} – {format_rupees(event.amount) if event.amount else ''} "
             f"(order {event.order_no}).\nOrder from {supplier}.\nShip to: {event.delivery_address or '-'}")
-    try:
-        owners = await dropship_intake.owner_numbers()
-    except Exception:  # noqa: BLE001
-        owners = dropship_intake.cached_owner_numbers()
+    if event.owner_phone:
+        owners = {event.owner_phone}
+    else:
+        try:
+            owners = await dropship_intake.owner_numbers()
+        except Exception:  # noqa: BLE001
+            owners = dropship_intake.cached_owner_numbers()
     for owner in owners:
         result = await whatsapp_client.send_text(owner, text)
         if not result.ok:

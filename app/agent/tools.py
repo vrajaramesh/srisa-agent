@@ -999,7 +999,7 @@ async def set_cart_item(ctx: ToolContext, args: dict[str, Any]) -> dict[str, Any
         draft.kind, draft.mybill_customer_id = DRAFT_GOODS, customer["customer_id"]
         ctx.conversation.mybill_customer_id = customer["customer_id"]
         ctx.draft = draft
-    draft.lines = [{"code": q.get("item_code"), "product_id": q["product_id"], "quantity": float(q["quantity"]),
+    draft.lines = [{"code": q.get("item_code"), "product_id": q.get("product_id"), "quantity": float(q["quantity"]),
                     "size": q.get("size"), "name": q.get("name"), "colour": q.get("colour"), "kind": q.get("kind"),
                     "unit": q.get("unit"), "unit_price": q.get("unit_price"), "line_total": q.get("line_total")}
                    for q in quote["lines"]]
