@@ -24,7 +24,7 @@ COMMAND = re.compile(r"(?is)^\s*(done|new supplier\b.*|supplier\s+.+|retry\s*#?\
 
 
 OWNER_CACHE_SECONDS = 60
-_owner_cache: tuple[float, set[str]] = (0.0, set())
+_owner_cache: tuple[float, set[str]] = (float("-inf"), set())   # -inf: fetch on the first message (monotonic starts near 0)
 
 
 async def owner_numbers() -> set[str]:
@@ -44,7 +44,7 @@ async def owner_numbers() -> set[str]:
     return cached | get_settings().owner_number_set
 
 
-_supplier_cache: tuple[float, set[str]] = (0.0, set())
+_supplier_cache: tuple[float, set[str]] = (float("-inf"), set())
 
 
 async def supplier_numbers() -> set[str]:
