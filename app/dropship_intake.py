@@ -143,9 +143,10 @@ async def boost(job: dict[str, Any]) -> dict[str, Any]:
 
 
 def needs_boosting(result: dict[str, Any], owner: str) -> dict[str, Any] | None:
-    """The boost to create once the owner chose budget + audience (owner-reply result), else None."""
+    """The boost to create once the owner chose budget, days and audience (owner-reply result), else None."""
     if result.get("action") == "boost" and result.get("collection_id"):
-        return {"collection_id": int(result["collection_id"]), "days": int(result["days"]),
+        return {"collection_id": int(result["collection_id"]), "daily_budget": int(result.get("daily_budget") or 200),
+                "days": int(result["days"]),
                 "audience": result["audience"], "owner": owner}
     return None
 
