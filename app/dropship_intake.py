@@ -20,7 +20,8 @@ from app.webhook_parser import IncomingMessage
 logger = logging.getLogger(__name__)
 
 # Owner texts that are commands, not part of a forwarded post.
-COMMAND = re.compile(r"(?is)^\s*(done|new supplier\b.*|supplier\s+.+|retry\s*#?\d+|price\s+[a-z0-9-]*\s*₹?\s*\d{2,6}(\.\d{1,2})?)$")
+COMMAND = re.compile(r"(?is)^\s*(done|new supplier\b.*|supplier\s+.+|retry\s*#?\d+|price\s+[a-z0-9-]*\s*₹?\s*\d{2,6}(\.\d{1,2})?"
+                     r"|(stop\s+)?boost\s+[a-z0-9-]+)\s*$")
 
 
 OWNER_CACHE_SECONDS = 60
@@ -134,6 +135,18 @@ def needs_publishing(result: dict[str, Any]) -> int | None:
     """The collection to post once the owner tapped Approve (owner-reply result), else None."""
     if result.get("action") == "publish" and result.get("collection_id"):
         return int(result["collection_id"])
+    return None
+
+
+async def boost(job: dict[str, Any]) -> dict[str, Any]:
+    return await _client().dropship_boost(job)
+
+
+def needs_boosting(result: dict[str, Any], owner: str) -> dict[str, Any] | None:
+    """The boost to create once the owner chose budget + audience (owner-reply result), else None."""
+    if result.get("action") == "boost" and result.get("collection_id"):
+        return {"collection_id": int(result["collection_id"]), "days": int(result["days"]),
+                "audience": result["audience"], "owner": owner}
     return None
 
 

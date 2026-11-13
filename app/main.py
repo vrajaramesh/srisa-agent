@@ -327,6 +327,8 @@ async def owner_message_task(request: Request) -> Response:
             await queue.enqueue_dropship_extract(batch_id)
         if (collection_id := dropship_intake.needs_publishing(result)) is not None:
             await queue.enqueue_dropship_publish(collection_id)
+        if (job := dropship_intake.needs_boosting(result, p["from"])) is not None:
+            await queue.enqueue_dropship_boost(job)
     except MybillRejected as exc:   # bad input: retrying won't help
         logger.error("Dropship intake rejected", extra={"fields": {"wa_message_id": p.get("wa_message_id"), "error": str(exc)}})
         return JSONResponse({"status": "rejected"})
@@ -367,6 +369,19 @@ async def dropship_supplier_timeout_task(request: Request) -> Response:
     except Exception as exc:
         logger.error("Supplier timeout failed", extra={"fields": {"item": body.get("item_code"), "error": repr(exc)[:300]}})
         return JSONResponse({"status": "retry"}, status_code=500)
+
+
+@app.post(queue.DROPSHIP_BOOST_PATH)
+async def dropship_boost_task(request: Request) -> Response:
+    """Cloud Tasks: create the boost the owner chose. Always 200 - a retry could create a second ad."""
+    if not await _task_authorized(request):
+        return Response(status_code=403)
+    job = await request.json()
+    try:
+        return JSONResponse(await dropship_intake.boost(job))
+    except Exception as exc:  # noqa: BLE001
+        logger.error("Dropship boost failed", extra={"fields": {"collection_id": job.get("collection_id"), "error": repr(exc)[:300]}})
+        return JSONResponse({"status": "failed"})
 
 
 @app.post(queue.DROPSHIP_PUBLISH_PATH)

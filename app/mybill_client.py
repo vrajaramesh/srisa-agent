@@ -222,6 +222,10 @@ class MybillClient:
     async def dropship_sold_out(self, item_code: str) -> dict[str, Any]:
         return await self._request("POST", f"/api/agent/dropship/items/{item_code}/sold-out")
 
+    async def dropship_boost(self, job: dict[str, Any]) -> dict[str, Any]:
+        """Create the Click-to-WhatsApp ad for a posted collection (mybill tells the owner the result)."""
+        return await self._request("POST", "/api/agent/dropship/boost", json=job, timeout=120)
+
     async def dropship_publish(self, collection_id: int) -> dict[str, Any]:
         """Post an approved dropship collection on Instagram + the Meta catalog (can take a minute or two)."""
         return await self._request("POST", "/api/agent/dropship/publish", json={"collection_id": collection_id}, timeout=290)

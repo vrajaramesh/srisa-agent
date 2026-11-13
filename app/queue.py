@@ -6,6 +6,7 @@ import logging
 import uuid
 from collections.abc import Iterable
 from datetime import datetime, timedelta, timezone
+from typing import Any
 
 from fastapi import BackgroundTasks
 from google.cloud import tasks_v2
@@ -21,6 +22,7 @@ COMMENT_TASK_PATH = "/tasks/process-comment"
 OWNER_TASK_PATH = "/tasks/owner-message"          # one owner message -> mybill dropship intake
 DROPSHIP_CLOSE_PATH = "/tasks/dropship-close"     # delayed: close forwarded posts that went quiet
 DROPSHIP_EXTRACT_PATH = "/tasks/dropship-extract"  # build the draft collection (AI) once the supplier is chosen
+DROPSHIP_BOOST_PATH = "/tasks/dropship-boost"  # create the Instagram boost (Click-to-WhatsApp ad) the owner chose
 DROPSHIP_PUBLISH_PATH = "/tasks/dropship-publish"  # post an approved collection on Instagram + Meta catalog
 DROPSHIP_SUPPLIER_TIMEOUT_PATH = "/tasks/dropship-supplier-timeout"  # delayed: supplier silent → ask the owner
 
@@ -138,6 +140,18 @@ async def enqueue_dropship_extract(batch_id: int, background: BackgroundTasks | 
         await _create_http_task(DROPSHIP_EXTRACT_PATH, {"batch_id": batch_id})
     except Exception:
         logger.exception("Failed to enqueue dropship extraction", extra={"fields": {"batch_id": batch_id}})
+
+
+async def enqueue_dropship_boost(job: dict[str, Any]) -> None:
+    """Creating the ad takes a few Graph calls: its own task. Never retried (it spends money; mybill reports failures)."""
+    if not get_settings().use_cloud_tasks:
+        from app import dropship_intake
+        asyncio.create_task(dropship_intake.boost(job))
+        return
+    try:
+        await _create_http_task(DROPSHIP_BOOST_PATH, job)
+    except Exception:
+        logger.exception("Failed to enqueue dropship boost", extra={"fields": {"collection_id": job.get("collection_id")}})
 
 
 async def enqueue_dropship_publish(collection_id: int) -> None:
