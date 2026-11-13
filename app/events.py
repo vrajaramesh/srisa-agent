@@ -6,6 +6,7 @@ after a failed send re-sends and a duplicate after success is ignored.
 """
 
 import logging
+import uuid
 from datetime import date, datetime, timedelta, timezone
 from typing import Any
 
@@ -276,6 +277,12 @@ async def _supplier_check(to: str, event: PaymentEvent) -> dict[str, Any]:
         text = f"(Couldn't reach the supplier on WhatsApp)\n{event.text}"
         if (await whatsapp_client.send_buttons(owner, text, event.buttons or [])).ok:
             sent += 1
+    try:   # event_id avail-supplier:{conversationId}:{itemCode}:{uuid}
+        _, conv_id, item_code, _ = event.event_id.split(":", 3)
+        from app import dropship_flow
+        await dropship_flow.owner_asked_instead(uuid.UUID(conv_id), item_code)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Supplier timeout not cancelled", extra={"fields": {"event_id": event.event_id, "error": repr(exc)[:200]}})
     return {"status": "fallback", "owners": sent}
 
 

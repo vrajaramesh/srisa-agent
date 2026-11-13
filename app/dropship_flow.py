@@ -158,7 +158,7 @@ async def _ask_owner(ctx: tools.ToolContext, item_code: str, qty: int) -> bool:
         await queue.enqueue_supplier_timeout(conv.id, item_code.upper(), get_settings().dropship_supplier_reply_minutes * 60)
     st = _state(conv)
     _save(conv, step="awaiting_owner", pending={**_pending(st), item_code.upper(): qty}, item=None,
-          asked_at=_now().isoformat())
+          asked_at=_now().isoformat(), escalated=[c for c in st.get("escalated") or [] if c != item_code.upper()])
     ctx.actions.append({"action": "dropship_availability_asked", "code": item_code, "quantity": qty})
     return True
 
@@ -450,6 +450,18 @@ async def supplier_timeout(conversation_id: uuid.UUID, item_code: str) -> dict[s
         _save(conv, escalated=sorted({*(st.get("escalated") or []), code}))
         logger.info("DROPSHIP_SUPPLIER_SILENT", extra={"fields": {"item": code}})
         return {"status": "owner_asked"}
+
+
+async def owner_asked_instead(conversation_id: uuid.UUID, item_code: str) -> None:
+    """The supplier couldn't be reached, so the owner was asked straight away: the 15-min check must not ask again."""
+    from app import repositories as repo
+    from app.db import get_sessionmaker
+    async with get_sessionmaker()() as session, session.begin():
+        await repo.lock_conversation(session, conversation_id)
+        conv = await session.get(Conversation, conversation_id)
+        if conv is not None:
+            st = _state(conv)
+            _save(conv, escalated=sorted({*(st.get("escalated") or []), item_code.upper()}))
 
 
 def draft_has_dropship(ctx: tools.ToolContext) -> bool:
