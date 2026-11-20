@@ -41,6 +41,10 @@ class AgentSettings(BaseSettings):
     # Short redirect to the pre-typed WhatsApp order message, for text links on Instagram (long wa.me links aren't
     # clickable there): {order_link_base}/KUR-101/IG-7K3QA. Served by the shop site (mybill-ecom nginx). Empty = wa.me.
     order_link_base: str = "https://srisafabrics.com/wa"
+    # WhatsApp community invite sent to customers who open a chat from an Instagram ad (boost); members get a discount.
+    # Empty link = not sent.
+    community_invite_link: str = "https://chat.whatsapp.com/Is1cganaoXQHPEytyWwpUC"
+    community_discount_percent: int = 10
     # The shop website: a design's fabrics are sold there ({shop_url}/?fabrics=FRO-11 lists them all).
     shop_url: str = "https://srisafabrics.com"
 

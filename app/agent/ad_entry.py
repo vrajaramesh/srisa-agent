@@ -261,3 +261,23 @@ def marketing_event(conversation: Conversation, referral: Referral, occurred_at:
     if occurred_at:
         event["occurred_at"] = occurred_at.isoformat()
     return event
+
+
+def community_invite_text(link: str, percent: int) -> str:
+    return (f"🎉 Join our WhatsApp community for new arrivals and offers – members get *{percent}% off* their order!\n"
+            f"Tap to join: {link}")
+
+
+async def send_community_invite(ctx: tools.ToolContext, referral: Referral) -> bool:
+    """After the first reply to a chat opened from an ad: invite her to the community (members get a discount).
+    Ads only (not organic posts). Best effort: False if not sent, never fails the turn."""
+    from app.config import get_agent_settings
+    s = get_agent_settings()
+    if not s.community_invite_link or referral.source_type != "ad":
+        return False
+    sent = await ctx.messenger.send_text(community_invite_text(s.community_invite_link, s.community_discount_percent))
+    if sent:
+        ctx.actions.append({"action": "community_invite"})
+    else:
+        logger.warning("Community invite not sent", extra={"fields": {"conversation_id": str(ctx.conversation.id)}})
+    return bool(sent)
